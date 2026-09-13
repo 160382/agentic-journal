@@ -174,3 +174,18 @@ def test_redaction_is_linear_on_long_dotted_strings():
 
     assert result == payload  # nothing secret-shaped to redact
     assert elapsed < 3.0, f"redaction took {elapsed:.2f}s (possible ReDoS)"
+
+
+def test_redact_value_keeps_extended_numeric_token_usage_counters():
+    from agentic_journal.security import redact_value
+
+    usage = {
+        "input_tokens": 1,
+        "cached_input_tokens": 2,
+        "cache_read_input_tokens": 3,
+        "cache_write_input_tokens": 4,
+        "reasoning_output_tokens": 5,
+        "total_tokens": 6,
+    }
+
+    assert redact_value({"evidence": {"token_usage": usage}}) == {"evidence": {"token_usage": usage}}

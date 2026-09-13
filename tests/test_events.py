@@ -137,3 +137,18 @@ def test_normalize_event_default_ts_has_microsecond_precision():
     event = normalize_event({"event_type": "agent_start", "agent": "codex"})
 
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}[+-]\d{2}:\d{2}", event["ts"])
+
+
+def test_normalize_event_keeps_agent_and_turn_identity():
+    event = normalize_event(
+        {
+            "event_type": "model_operation",
+            "agent": "codex",
+            "session_id": "s1",
+            "agent_id": "thread-2",
+            "agent_type": "worker",
+            "turn_id": "turn-3",
+        }
+    )
+
+    assert (event["agent_id"], event["agent_type"], event["turn_id"]) == ("thread-2", "worker", "turn-3")

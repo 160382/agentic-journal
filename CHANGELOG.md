@@ -16,6 +16,12 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
   stores a person's message verbatim in `semantic.text`, bypassing redaction and
   the free-text cap. Project mirrors receive it only with
   `[mirror] include_prompts = true`.
+- `journal_note` takes an optional `category` and a hook-supplied `runtime`
+  object that places author, turn, directory, and usage metadata on the event;
+  it returns `logged <event_id>` and declares non-destructive tool annotations.
+  Events keep top-level `agent_id`, `agent_type`, and `turn_id`, and
+  `token_usage` accepts cache-read, cache-write, reasoning-output, and total
+  counters.
 
 ### Security
 

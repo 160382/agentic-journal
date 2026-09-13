@@ -16,7 +16,11 @@ TOKEN_USAGE_KEYS = {
     "output_tokens",
     "cached_input_tokens",
     "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cache_write_input_tokens",
     "reasoning_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
 }
 
 # Secret-named assignments: `API_KEY=...`, `DB_PASSWORD: "..."`, `AccountKey=...`.

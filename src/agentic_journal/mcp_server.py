@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from agentic_journal.events import (
     MODEL_OPERATION_EVENT_TYPE,
@@ -20,17 +22,38 @@ SKIPPED_TASK_OR_NOTE_REQUIRED = "skipped: task_id or note is required"
 SKIPPED_REASON_REQUIRED = "skipped: reason is required"
 SKIPPED_MODEL_OPERATION_METADATA_REQUIRED = "skipped: model operation metadata is required"
 
+MAX_CATEGORY_LENGTH = 64
+
+# How journal_note places the runtime metadata a client hook injects: identity
+# of the author and turn goes to the event top level, execution conditions and
+# measurements go to evidence. Unlisted runtime keys are dropped.
+RUNTIME_TOP_LEVEL_KEYS = ("agent_id", "agent_type", "turn_id")
+RUNTIME_EVIDENCE_KEYS = (
+    "model",
+    "permission_mode",
+    "collaboration_mode",
+    "effort",
+    "usage_scope",
+    "usage_status",
+    "stats_error",
+    "token_usage",
+    "turn_elapsed_ms",
+    "native_session_id",
+    "tool_use_id",
+    "injected_by",
+)
+
 
 def _clean_text(value: str | None) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _event_context(session_id: str | None = None) -> dict:
+def _event_context(session_id: str | None = None, cwd: Path | None = None) -> dict:
     return {
         "session_id": session_id
         or os.environ.get("AGENTIC_JOURNAL_SESSION_ID")
         or os.environ.get("AGENT_JOURNAL_SESSION_ID"),
-        **event_context(Path.cwd()),
+        **event_context(cwd or Path.cwd()),
     }
 
 
@@ -39,20 +62,34 @@ def journal_note(
     agent: str = "unknown",
     note: str = "",
     session_id: str | None = None,
+    category: str = "",
+    runtime: Mapping[str, Any] | None = None,
 ) -> str:
     note_text = _clean_text(note)
     if not note_text:
         return SKIPPED_NOTE_REQUIRED
+    runtime = runtime if isinstance(runtime, Mapping) else {}
+    semantic = {"note": note_text}
+    # An over-long category is cut rather than rejected so the note survives.
+    category_text = _clean_text(category)[:MAX_CATEGORY_LENGTH].rstrip()
+    if category_text:
+        semantic["category"] = category_text
+    # One MCP server can serve agents in different directories, so the agent's
+    # own cwd, when the runtime supplies it, decides the git context. The path
+    # is used as given: whitespace at its ends is part of a valid directory name.
+    runtime_cwd = runtime.get("cwd")
     event = normalize_event(
         {
             "event_type": SEMANTIC_NOTE_EVENT_TYPE,
-            "agent": agent,
-            **_event_context(session_id),
-            "semantic": {"note": note_text},
+            "agent": _clean_text(runtime.get("client")) or agent,
+            **_event_context(session_id, Path(runtime_cwd) if isinstance(runtime_cwd, str) and runtime_cwd else None),
+            **{key: runtime[key] for key in RUNTIME_TOP_LEVEL_KEYS if runtime.get(key) not in (None, "")},
+            "semantic": semantic,
+            "evidence": {key: runtime[key] for key in RUNTIME_EVIDENCE_KEYS if runtime.get(key) is not None},
         }
     )
     write_event(journal_home, event)
-    return "logged"
+    return f"logged {event['event_id']}"
 
 
 def journal_task_completed(
@@ -221,11 +258,38 @@ def create_mcp_server():
     except ImportError as exc:
         raise RuntimeError("The 'mcp' package is required to run agentic-journal-mcp") from exc
 
+    from mcp.types import ToolAnnotations
+
     server = FastMCP("agentic-journal")
 
-    @server.tool(name="journal_note")
-    def journal_note_tool(agent: str = "unknown", note: str = "", session_id: str = "") -> str:
-        return journal_note(agent=agent, note=note, session_id=session_id or None)
+    @server.tool(
+        name="journal_note",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+    def journal_note_tool(
+        note: str,
+        category: str = "",
+        agent: str = "unknown",
+        session_id: str = "",
+        runtime: dict[str, Any] | None = None,
+    ) -> str:
+        """Record a short semantic note about the agent's work.
+
+        `category` is an optional short slug. `runtime` carries metadata that
+        client hooks inject; agents leave it empty.
+        """
+        return journal_note(
+            agent=agent,
+            note=note,
+            session_id=session_id or None,
+            category=category,
+            runtime=runtime,
+        )
 
     @server.tool(name="journal_session_summary")
     def journal_session_summary_tool(

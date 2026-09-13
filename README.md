@@ -239,6 +239,17 @@ current working directory plus git repo, branch, and commit context. This keeps
 MCP outcome events correlated with wrapper `agent_start` / `agent_end` events
 and prevents the session guard from reporting false missing-summary risks.
 
+`journal_note(note, category="", agent="unknown", session_id="", runtime=None)`
+returns `logged <event_id>`; a storage failure is returned as a tool error.
+`category` is a free-form slug stored in `semantic.category` and cut to 64
+characters. `runtime` is meant for client hooks that rewrite the tool call
+before it reaches the server, not for the model: `client` replaces `agent`,
+`agent_id`, `agent_type`, and `turn_id` go to the event top level, `cwd` sets
+the event directory and its git context, and `model`, `permission_mode`,
+`collaboration_mode`, `effort`, `usage_scope`, `usage_status`, `stats_error`,
+`token_usage`, `turn_elapsed_ms`, `native_session_id`, `tool_use_id`, and
+`injected_by` go to `evidence`. Other runtime keys are dropped.
+
 ## Guarding Agent Sessions
 
 The wrapper flow exports an `AGENTIC_JOURNAL_SESSION_ID`, writes `agent_start` and

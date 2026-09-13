@@ -14,6 +14,9 @@ Common optional fields:
 
 - `agent`
 - `session_id`
+- `agent_id` — the sub-agent inside a session; absent for the main agent
+- `agent_type`
+- `turn_id` — the client turn or prompt the event belongs to
 - `cwd`
 - `repo`
 - `branch`
@@ -36,6 +39,16 @@ Outcome events:
 - `semantic.task_id` should be set when the session maps to a Backlog task or
   other stable task identifier.
 
+Semantic note events:
+
+- `semantic_note` holds `semantic.note` and an optional free-form
+  `semantic.category` slug of at most 64 characters.
+- `journal_note` accepts a `runtime` object from client hooks. Author and turn
+  identity (`agent_id`, `agent_type`, `turn_id`) land on the top level, `cwd`
+  sets the event directory and git context, and execution conditions and
+  measurements (model, modes, effort, `token_usage`, usage scope and status,
+  elapsed time, native ids) land in `evidence`.
+
 Model operation events:
 
 - `model_operation` records one model call or model-backed step from a project
@@ -43,8 +56,9 @@ Model operation events:
 - Store labels in `semantic`: provider, model, operation, source, and status.
 - Store measured facts in `evidence`: `token_usage` with numeric
   `input_tokens`, `output_tokens`, `cached_input_tokens`,
-  `cache_creation_input_tokens`, or `reasoning_tokens`, plus `error_code` when
-  available.
+  `cache_creation_input_tokens`, `cache_read_input_tokens`,
+  `cache_write_input_tokens`, `reasoning_tokens`, `reasoning_output_tokens`, or
+  `total_tokens`, plus `error_code` when available.
 - Use top-level `duration_ms` for elapsed runtime and `session_id` for the
   caller's correlation id when available.
 - `model_operation` events are reported under Model Activity. They are not
