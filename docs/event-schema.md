@@ -91,6 +91,30 @@ Correlation rules:
 - Events with a future `schema_version` are skipped by current readers instead
   of being silently misclassified.
 
+Write ordering rules:
+
+- Every inserted row gets `seq`, a journal-wide integer that increases by one
+  per new event. A duplicate `event_id` keeps the `seq` of its first write.
+  Readers order events by `seq`, not by `ts`, so events keep the order in which
+  they were written even when a caller supplies an older timestamp.
+- Default `ts` values carry microseconds.
+- Writers to one journal root are serialized by an advisory `flock` on
+  `<root>/.write.lock`: the SQLite insert and the JSONL append of one event
+  happen under the lock, so JSONL lines follow `seq`. The lock also guards
+  one-time database setup (WAL mode and migrations) for readers and writers.
+  The lock relies on POSIX `fcntl.flock`; on platforms without it writes are
+  not serialized and the JSONL order is not guaranteed to follow `seq`.
+- Each JSONL line is encoded up front and appended with `O_APPEND`, so a long
+  line is never interleaved with another writer's output.
+- The daily JSONL files are a derived copy of SQLite. The lock orders
+  concurrent writes but does not make the two stores atomic: a process killed
+  between the insert and the append leaves the event in SQLite only, and
+  nothing reconciles the JSONL copy afterwards.
+- The database layout version lives in `PRAGMA user_version` and changes
+  independently of the event `schema_version`. Layout 2 adds the `seq`,
+  `agent_id`, and `turn_id` index columns; existing rows get `seq` in
+  `ts, event_id` order during the migration.
+
 Project mirror rules:
 
 - A `.agentic-journal.toml` file can opt a project into a local mirror. Matching

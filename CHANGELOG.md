@@ -39,10 +39,18 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
   In Progress. Corrupt JSONL lines are skipped on read. Malformed timestamps and
   oversized free-text semantic fields are rejected/capped at normalization.
 - The web token comparison no longer raises on a non-ASCII token.
+- Concurrent writers to one journal root no longer interleave long JSONL lines
+  or write them out of order: the SQLite insert and JSONL append run under an
+  advisory `flock`, and each line is appended as one `O_APPEND` buffer.
+- Concurrent first use of a fresh journal no longer fails with
+  `database is locked` while switching to WAL mode.
 
 ### Changed
 
 - CI now runs the test and smoke suite on Python 3.11, 3.12, and 3.13.
+- Events get a journal-wide `seq` and readers order by it instead of `ts`;
+  default timestamps carry microseconds. The database layout moves to version 2
+  (`seq`, `agent_id`, `turn_id` columns) with an in-place migration.
 
 ## [0.1.0] - 2026-06-02
 

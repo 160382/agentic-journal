@@ -129,3 +129,11 @@ def test_normalize_event_caps_long_free_text():
 
     assert event["semantic"]["note"].endswith("…[truncated]")
     assert len(event["semantic"]["note"]) <= MAX_SEMANTIC_TEXT + len("…[truncated]")
+
+
+def test_normalize_event_default_ts_has_microsecond_precision():
+    import re
+
+    event = normalize_event({"event_type": "agent_start", "agent": "codex"})
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}[+-]\d{2}:\d{2}", event["ts"])

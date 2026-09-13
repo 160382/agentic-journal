@@ -1,17 +1,29 @@
-import pytest
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+from contextlib import closing
 from pathlib import Path
+
+import pytest
 
 from agentic_journal import storage
 from agentic_journal.config import journal_root
 from agentic_journal.storage import (
+    DB_SCHEMA_VERSION,
     append_jsonl_event,
     init_db,
     insert_event,
     read_events_for_date,
     read_events_for_session,
     read_jsonl_events,
+    record_event,
     write_event,
 )
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 
 def _event(event_id, ts="2026-05-31T10:00:00+03:00", **updates):
@@ -132,9 +144,9 @@ def test_init_db_tracks_schema_user_version(tmp_path):
 
     init_db(root)
 
-    with storage.connect(root) as conn:
+    with closing(storage.connect(root)) as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 1
+    assert version == DB_SCHEMA_VERSION == 2
 
 
 def test_read_events_skips_future_schema_versions(tmp_path):
@@ -180,7 +192,7 @@ def test_write_event_secures_db_and_wal_sidecar_permissions(tmp_path):
 
     db_files = glob.glob(str(root / "agentic-journal.db*"))
     assert any(name.endswith("agentic-journal.db") for name in db_files)
-    for path in db_files:
+    for path in [*db_files, str(root / storage.WRITE_LOCK_FILENAME)]:
         mode = stat.S_IMODE(os.stat(path).st_mode)
         assert mode == 0o600, (os.path.basename(path), oct(mode))
 
@@ -295,3 +307,153 @@ def test_project_mirror_append_failure_does_not_fail_global_write(tmp_path, monk
 
     assert [item["event_id"] for item in read_events_for_date(global_root, "2026-05-31")] == ["global-survives"]
     assert "failed to mirror Agentic Journal event" in capsys.readouterr().err
+
+
+_CONCURRENT_WRITER = """
+import sys
+import time
+from pathlib import Path
+
+from agentic_journal.storage import write_event
+
+root, worker, count, size, start_flag = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), Path(sys.argv[5])
+while not start_flag.exists():
+    time.sleep(0.005)
+for index in range(count):
+    write_event(
+        root,
+        {
+            "schema_version": 1,
+            "event_id": f"{worker}-{index}",
+            "ts": "2026-05-31T10:00:00.000000+03:00",
+            "event_type": "semantic_note",
+            "agent": worker,
+            "semantic": {"note": worker[-1] * size},
+            "evidence": {},
+        },
+    )
+"""
+
+
+def test_concurrent_processes_keep_jsonl_lines_whole_and_ordered_by_seq(tmp_path):
+    root = tmp_path / "journal"
+    start_flag = tmp_path / "start"
+    workers, count, size = 6, 20, 70_000
+    env = {**os.environ, "PYTHONPATH": str(SRC_DIR)}
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", _CONCURRENT_WRITER, str(root), f"w{worker}", str(count), str(size), str(start_flag)],
+            env=env,
+            cwd=tmp_path,
+        )
+        for worker in range(workers)
+    ]
+    time.sleep(0.5)
+    start_flag.touch()
+    assert [process.wait(timeout=120) for process in processes] == [0] * workers
+
+    raw_lines = (root / "events" / "2026-05-31.jsonl").read_bytes().split(b"\n")
+    assert raw_lines[-1] == b""
+    jsonl_ids = [json.loads(line)["event_id"] for line in raw_lines[:-1]]
+    with closing(storage.connect(root)) as conn:
+        rows = conn.execute("SELECT event_id, seq FROM events ORDER BY seq").fetchall()
+
+    total = workers * count
+    assert len(jsonl_ids) == total
+    assert [row["seq"] for row in rows] == list(range(1, total + 1))
+    assert jsonl_ids == [row["event_id"] for row in rows]
+
+
+def test_init_db_migrates_version_1_database(tmp_path):
+    root = tmp_path / "journal"
+    root.mkdir()
+    late = _event("late", ts="2026-05-31T11:00:00+03:00", agent_id="agent-1", turn_id="turn-1")
+    early = _event("early", ts="2026-05-31T10:00:00+03:00")
+    with closing(sqlite3.connect(root / "agentic-journal.db")) as conn:
+        storage._migrate_to_1(conn)
+        for event in (late, early):
+            conn.execute(
+                "INSERT INTO events (event_id, schema_version, ts, event_type, agent, raw_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (event["event_id"], 1, event["ts"], event["event_type"], event["agent"], json.dumps(event)),
+            )
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+
+    init_db(root)
+
+    with closing(storage.connect(root)) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        rows = conn.execute("SELECT event_id, seq, agent_id, turn_id FROM events ORDER BY seq").fetchall()
+    assert version == DB_SCHEMA_VERSION
+    assert [tuple(row) for row in rows] == [("early", 1, None, None), ("late", 2, "agent-1", "turn-1")]
+    assert record_event(root, _event("next")).seq == 3
+
+
+def test_record_event_reports_seq_for_new_and_duplicate_events(tmp_path):
+    root = tmp_path / "journal"
+
+    first = record_event(root, _event("e1"))
+    second = record_event(root, _event("e2"))
+    duplicate = record_event(root, _event("e1"))
+
+    assert (first.inserted, first.seq) == (True, 1)
+    assert (second.inserted, second.seq) == (True, 2)
+    assert (duplicate.inserted, duplicate.seq) == (False, 1)
+    assert duplicate.path == first.path
+
+
+def test_insert_event_stores_track_columns(tmp_path):
+    root = tmp_path / "journal"
+
+    insert_event(root, _event("e1", session_id="s1", agent_id="agent-1", turn_id="turn-1"))
+
+    with closing(storage.connect(root)) as conn:
+        row = conn.execute("SELECT seq, session_id, agent_id, turn_id FROM events").fetchone()
+    assert tuple(row) == (1, "s1", "agent-1", "turn-1")
+
+
+def test_reads_follow_write_order_not_ts(tmp_path):
+    root = tmp_path / "journal"
+    write_event(root, _event("written-first", ts="2026-05-31T11:00:00+03:00", session_id="s1"))
+    write_event(root, _event("written-second", ts="2026-05-31T10:00:00+03:00", session_id="s1"))
+
+    expected = ["written-first", "written-second"]
+    assert [event["event_id"] for event in read_events_for_date(root, "2026-05-31")] == expected
+    assert [event["event_id"] for event in read_events_for_session(root, "s1")] == expected
+
+
+_CONCURRENT_READER = """
+import sys
+import time
+from pathlib import Path
+
+from agentic_journal.storage import read_events_for_date
+
+root, start_flag = sys.argv[1], Path(sys.argv[2])
+while not start_flag.exists():
+    time.sleep(0.001)
+read_events_for_date(root, None)
+"""
+
+
+def test_concurrent_readers_initialize_fresh_database(tmp_path):
+    root = tmp_path / "journal"
+    start_flag = tmp_path / "start"
+    env = {**os.environ, "PYTHONPATH": str(SRC_DIR)}
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", _CONCURRENT_READER, str(root), str(start_flag)],
+            env=env,
+            cwd=tmp_path,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(12)
+    ]
+    time.sleep(0.5)
+    start_flag.touch()
+    results = [(process.wait(timeout=120), process.stderr.read().decode()) for process in processes]
+
+    assert [code for code, _ in results] == [0] * len(processes), [err for code, err in results if code]
+    with closing(storage.connect(root)) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == DB_SCHEMA_VERSION

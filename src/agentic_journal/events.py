@@ -78,7 +78,7 @@ def normalize_event(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsupported event_type: {event_type!r}")
 
     provided_ts = event.get("ts")
-    ts = _validate_ts(provided_ts) if provided_ts else datetime.now().astimezone().isoformat(timespec="seconds")
+    ts = _validate_ts(provided_ts) if provided_ts else datetime.now().astimezone().isoformat(timespec="microseconds")
 
     normalized: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,

@@ -288,7 +288,10 @@ Agentic Journal writes each event to both:
 - `~/.agentic-journal/agentic-journal.db`
 
 Duplicate `event_id` writes are ignored in both SQLite and the JSONL mirror so
-the two stores stay aligned.
+the two stores stay aligned. SQLite is the source of truth; the JSONL files are
+a derived copy. Concurrent writers to one root are serialized with an advisory
+lock on `.write.lock`, every new event gets a journal-wide `seq`, and readers
+return events in `seq` order.
 
 When a project mirror config matches an event `cwd` or `repo`, the same event is
 also written to that mirror root using the identical SQLite and JSONL layout.

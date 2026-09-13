@@ -1,15 +1,37 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentic_journal.config import ensure_config, journal_root, secure_dir, secure_file
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms have no flock
+    fcntl = None
+
+from agentic_journal.config import FILE_MODE, ensure_config, journal_root, secure_dir, secure_file
 from agentic_journal.events import SCHEMA_VERSION
 from agentic_journal.project_config import discover_project_mirror_configs, event_matches_project
+
+# Layout version of the SQLite database, tracked in PRAGMA user_version. It is
+# independent of the event SCHEMA_VERSION: index columns can change without
+# changing the event payload.
+DB_SCHEMA_VERSION = 2
+WRITE_LOCK_FILENAME = ".write.lock"
+BUSY_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class StoredEvent:
+    path: Path
+    inserted: bool
+    seq: int
 
 
 def _date_from_ts(ts: str) -> str:
@@ -19,14 +41,26 @@ def _date_from_ts(ts: str) -> str:
     return date
 
 
+def _root_path(root: str | Path | None) -> Path:
+    return Path(root).expanduser() if root else journal_root()
+
+
 def append_jsonl_event(root: str | Path, event: dict[str, Any]) -> Path:
     root_path = Path(root).expanduser()
     date = _date_from_ts(event["ts"])
     event_dir = secure_dir(root_path / "events")
     path = event_dir / f"{date}.jsonl"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True))
-        handle.write("\n")
+    # The whole line goes out through O_APPEND writes of one buffer: buffered
+    # text IO would split a long line into several writes that another process
+    # could interleave.
+    line = (json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, FILE_MODE)
+    try:
+        view = memoryview(line)
+        while view:
+            view = view[os.write(fd, view) :]
+    finally:
+        os.close(fd)
     secure_file(path)
     return path
 
@@ -55,9 +89,22 @@ def db_file(root: str | Path | None = None) -> Path:
 def connect(root: str | Path | None = None) -> sqlite3.Connection:
     path = db_file(root)
     secure_dir(path.parent)
-    conn = sqlite3.connect(path)
+    # Autocommit mode: writers open explicit BEGIN IMMEDIATE transactions, so
+    # seq allocation and migrations take the database write lock up front.
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@contextmanager
+def _immediate_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
 def _migrate_to_1(conn: sqlite3.Connection) -> None:
@@ -87,27 +134,60 @@ def _migrate_to_1(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id)")
 
 
+def _migrate_to_2(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE events ADD COLUMN seq INTEGER")
+    conn.execute("ALTER TABLE events ADD COLUMN agent_id TEXT")
+    conn.execute("ALTER TABLE events ADD COLUMN turn_id TEXT")
+    # Rows written before seq existed keep the order readers used to apply.
+    rows = conn.execute("SELECT event_id, raw_json FROM events ORDER BY ts, event_id").fetchall()
+    for seq, row in enumerate(rows, start=1):
+        event = json.loads(row["raw_json"])
+        conn.execute(
+            "UPDATE events SET seq = ?, agent_id = ?, turn_id = ? WHERE event_id = ?",
+            (seq, event.get("agent_id"), event.get("turn_id"), row["event_id"]),
+        )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_seq ON events(seq)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_track ON events(session_id, agent_id, seq)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_turn_id ON events(turn_id)")
+
+
 MIGRATIONS = {
     1: _migrate_to_1,
+    2: _migrate_to_2,
 }
 
 
+def _user_version(conn: sqlite3.Connection) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> None:
-    current_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if current_version > SCHEMA_VERSION:
+    if _user_version(conn) >= DB_SCHEMA_VERSION:
         return
-    for version in range(current_version + 1, SCHEMA_VERSION + 1):
-        migration = MIGRATIONS[version]
-        migration(conn)
-        conn.execute(f"PRAGMA user_version = {version}")
+    with _immediate_transaction(conn):
+        # Re-read under the write lock: every reader and writer runs init_db, so
+        # another process may have migrated since the unlocked check above.
+        for version in range(_user_version(conn) + 1, DB_SCHEMA_VERSION + 1):
+            MIGRATIONS[version](conn)
+            conn.execute(f"PRAGMA user_version = {version}")
+
+
+def _db_ready(conn: sqlite3.Connection) -> bool:
+    return conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal" and _user_version(conn) >= DB_SCHEMA_VERSION
 
 
 def init_db(root: str | Path | None = None) -> Path:
     path = db_file(root)
     ensure_config(path.parent)
-    with connect(root) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        _apply_migrations(conn)
+    with closing(connect(root)) as conn:
+        if not _db_ready(conn):
+            # Switching a fresh database to WAL fails with "database is locked"
+            # when another process does the same, and SQLite does not retry it
+            # through the busy timeout; readers race writers here too, so the
+            # one-time setup runs under the write lock.
+            with _write_lock(path.parent):
+                conn.execute("PRAGMA journal_mode=WAL")
+                _apply_migrations(conn)
     secure_file(path)
     # WAL mode creates `-wal` / `-shm` sidecars that hold the freshest, not-yet
     # checkpointed event data; restrict them to the owner as well.
@@ -118,15 +198,19 @@ def init_db(root: str | Path | None = None) -> Path:
     return path
 
 
-def insert_event(root: str | Path | None, event: dict[str, Any]) -> bool:
-    init_db(root)
-    with connect(root) as conn:
-        cursor = conn.execute(
+def _insert_row(conn: sqlite3.Connection, event: dict[str, Any]) -> tuple[bool, int]:
+    with _immediate_transaction(conn):
+        existing = conn.execute("SELECT seq FROM events WHERE event_id = ?", (event["event_id"],)).fetchone()
+        if existing is not None:
+            return False, existing["seq"]
+        seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events").fetchone()[0]
+        conn.execute(
             """
-            INSERT OR IGNORE INTO events (
+            INSERT INTO events (
               event_id, schema_version, ts, event_type, agent, session_id, cwd,
-              repo, branch, commit_hash, exit_code, duration_ms, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              repo, branch, commit_hash, exit_code, duration_ms, raw_json,
+              seq, agent_id, turn_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event["event_id"],
@@ -142,22 +226,60 @@ def insert_event(root: str | Path | None, event: dict[str, Any]) -> bool:
                 event.get("exit_code"),
                 event.get("duration_ms"),
                 json.dumps(event, ensure_ascii=False, sort_keys=True),
+                seq,
+                event.get("agent_id"),
+                event.get("turn_id"),
             ),
         )
-        return cursor.rowcount > 0
+    return True, seq
+
+
+def _insert_event(root: str | Path | None, event: dict[str, Any]) -> tuple[bool, int]:
+    init_db(root)
+    with closing(connect(root)) as conn:
+        return _insert_row(conn, event)
+
+
+def insert_event(root: str | Path | None, event: dict[str, Any]) -> bool:
+    return _insert_event(root, event)[0]
 
 
 def delete_event(root: str | Path | None, event_id: str) -> None:
-    with connect(root) as conn:
+    with closing(connect(root)) as conn:
         conn.execute("DELETE FROM events WHERE event_id = ?", (event_id,))
 
 
-def persist_event(root: str | Path | None, event: dict[str, Any]) -> tuple[Path, bool]:
-    root_path = Path(root).expanduser() if root else journal_root()
+@contextmanager
+def _write_lock(root_path: Path) -> Iterator[None]:
+    """Serialize "SQLite insert + JSONL append" between processes on one root.
+
+    SQLite alone keeps seq unique, but without this lock two writers could
+    append their JSONL lines in the opposite order of their seq values.
+    """
+    if fcntl is None:
+        yield
+        return
+    secure_dir(root_path)
+    fd = os.open(root_path / WRITE_LOCK_FILENAME, os.O_RDWR | os.O_CREAT, FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _persist(root_path: Path, event: dict[str, Any]) -> StoredEvent:
     path = root_path / "events" / f"{_date_from_ts(event['ts'])}.jsonl"
-    if insert_event(root_path, event):
+    # init_db may take the write lock itself; flock does not nest across file
+    # descriptors of one process, so it has to run before the lock below.
+    init_db(root_path)
+    with _write_lock(root_path):
+        with closing(connect(root_path)) as conn:
+            inserted, seq = _insert_row(conn, event)
+        if not inserted:
+            return StoredEvent(path, False, seq)
         try:
-            return append_jsonl_event(root_path, event), True
+            path = append_jsonl_event(root_path, event)
         except OSError:
             # Keep SQLite (read path) and the JSONL mirror consistent: if the
             # mirror append fails, roll back the SQLite row so a retry re-attempts
@@ -170,7 +292,12 @@ def persist_event(root: str | Path | None, event: dict[str, Any]) -> tuple[Path,
                 # actionable filesystem failure harder to diagnose.
                 pass
             raise
-    return path, False
+    return StoredEvent(path, True, seq)
+
+
+def persist_event(root: str | Path | None, event: dict[str, Any]) -> tuple[Path, bool]:
+    stored = _persist(_root_path(root), event)
+    return stored.path, stored.inserted
 
 
 def _mirror_event_to_project_roots(event: dict[str, Any]) -> None:
@@ -187,11 +314,20 @@ def _mirror_event_to_project_roots(event: dict[str, Any]) -> None:
             )
 
 
-def write_event(root: str | Path | None, event: dict[str, Any]) -> Path:
-    path, inserted = persist_event(root, event)
-    if inserted:
+def record_event(root: str | Path | None, event: dict[str, Any]) -> StoredEvent:
+    """Write an event to the journal root and its project mirrors.
+
+    Returns the JSONL path, whether the event was new, and its seq; a duplicate
+    ``event_id`` reports the seq it was stored under the first time.
+    """
+    stored = _persist(_root_path(root), event)
+    if stored.inserted:
         _mirror_event_to_project_roots(event)
-    return path
+    return stored
+
+
+def write_event(root: str | Path | None, event: dict[str, Any]) -> Path:
+    return record_event(root, event).path
 
 
 def _rows_to_events(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -205,15 +341,15 @@ def _rows_to_events(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 
 def read_events_for_date(root: str | Path | None, date: str | None) -> list[dict[str, Any]]:
-    root_path = Path(root).expanduser() if root else journal_root()
+    root_path = _root_path(root)
     init_db(root_path)
     query = "SELECT raw_json FROM events"
     params: tuple[str, ...] = ()
     if date:
         query += " WHERE ts LIKE ?"
         params = (f"{date}%",)
-    query += " ORDER BY ts, event_id"
-    with connect(root_path) as conn:
+    query += " ORDER BY seq"
+    with closing(connect(root_path)) as conn:
         rows = conn.execute(query, params).fetchall()
     return _rows_to_events(rows)
 
@@ -225,11 +361,11 @@ def read_events_for_session(root: str | Path | None, session_id: str) -> list[di
     cannot scope to a single date; querying by the indexed ``session_id`` avoids
     a full-table scan of the entire journal history on every session exit.
     """
-    root_path = Path(root).expanduser() if root else journal_root()
+    root_path = _root_path(root)
     init_db(root_path)
-    with connect(root_path) as conn:
+    with closing(connect(root_path)) as conn:
         rows = conn.execute(
-            "SELECT raw_json FROM events WHERE session_id = ? ORDER BY ts, event_id",
+            "SELECT raw_json FROM events WHERE session_id = ? ORDER BY seq",
             (session_id,),
         ).fetchall()
     return _rows_to_events(rows)
