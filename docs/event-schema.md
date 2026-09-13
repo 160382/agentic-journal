@@ -52,6 +52,21 @@ Model operation events:
 - Never store prompts, completions, transcripts, or file contents in
   `model_operation`.
 
+User message events:
+
+- `user_message` stores one message a person sent to an agent, exactly as the
+  client delivered it. It is opt-in: a journal root accepts it only when its
+  `config.toml` sets `[privacy] log_prompts = true`; otherwise the write is
+  rejected and nothing is stored.
+- `semantic.text` is required and holds the message verbatim. It is exempt from
+  redaction, trimming, and the `MAX_SEMANTIC_TEXT` cap, so whitespace, line
+  endings, code, Unicode, and anything secret-looking are kept byte for byte.
+  Other fields, such as `semantic.origin` for the input source, are normalized
+  like any other event.
+- `user_message` is not a session outcome or lifecycle event and does not
+  appear in daily report buckets. The web API returns it with the other raw
+  events of the day.
+
 Correlation rules:
 
 - `commit` is the strongest verification key. A `git_commit` item is
@@ -127,10 +142,14 @@ Project mirror rules:
   stderr and does not fail the global write.
 - Readers can point `status`, `report`, or `web` at a mirror root with `--root`
   and receive the same report or API payload shape as the global journal.
+- `user_message` events reach a mirror, through live writes or `mirror sync`,
+  only when the project config sets `[mirror] include_prompts = true`.
 
 Privacy rules:
 
-- Do not log prompt transcripts by default.
+- Do not log prompt transcripts by default. The only exception is the opt-in
+  `user_message` event described above, whose `semantic.text` is stored
+  without redaction or truncation.
 - Do not log full file contents.
 - Redact known API keys, bearer tokens, passwords, URL credentials, PEM private
   keys, and secret-looking values in both structured fields and free text.

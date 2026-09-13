@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agentic_journal.events import USER_MESSAGE_EVENT_TYPE
 
 CONFIG_FILENAME = ".agentic-journal.toml"
 
@@ -17,6 +18,7 @@ class ProjectMirrorConfig:
     project_path: Path
     mirror_enabled: bool
     mirror_root: Path
+    include_prompts: bool = False
 
 
 def _resolve_from(base: Path, raw_path: str) -> Path:
@@ -61,6 +63,9 @@ def load_project_config(path: str | Path) -> ProjectMirrorConfig:
     enabled = mirror.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError("'enabled' must be a boolean")
+    include_prompts = mirror.get("include_prompts", False)
+    if not isinstance(include_prompts, bool):
+        raise ValueError("'include_prompts' must be a boolean")
 
     return ProjectMirrorConfig(
         config_path=config_path,
@@ -68,6 +73,7 @@ def load_project_config(path: str | Path) -> ProjectMirrorConfig:
         project_path=_resolve_from(config_dir, project_path_raw or "."),
         mirror_enabled=enabled,
         mirror_root=_resolve_from(config_dir, mirror_path_raw or ".agentic-journal"),
+        include_prompts=include_prompts,
     )
 
 
@@ -80,6 +86,9 @@ def _path_matches(candidate: str | Path | None, root: Path) -> bool:
 
 def event_matches_project(config: ProjectMirrorConfig, event: dict[str, Any]) -> bool:
     if not config.mirror_enabled:
+        return False
+    # Verbatim user text stays in the global journal unless the project opts in.
+    if event.get("event_type") == USER_MESSAGE_EVENT_TYPE and not config.include_prompts:
         return False
     return _path_matches(event.get("repo"), config.project_path) or _path_matches(event.get("cwd"), config.project_path)
 

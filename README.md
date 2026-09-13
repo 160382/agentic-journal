@@ -178,6 +178,7 @@ path = "."
 [mirror]
 enabled = true
 path = ".agentic-journal"
+# include_prompts = true  # also mirror verbatim user_message events
 ```
 
 Relative `project.path` and `mirror.path` values resolve from the config file
@@ -311,6 +312,12 @@ defaults. A file that cannot be parsed, or a value whose type differs from its
 default, is ignored with a warning on stderr, so a broken config never blocks
 event writes.
 
+Keys that change behavior:
+
+| Key | Default | Effect |
+|---|---|---|
+| `[privacy] log_prompts` | `false` | Accept `user_message` events and store their `semantic.text` verbatim. |
+
 ## Development
 
 Run tests:
@@ -350,6 +357,11 @@ Agentic Journal is designed to avoid prompt transcript capture by default. Event
 writers should not log full file contents, prompt bodies, or secrets. Known API
 keys, bearer tokens, passwords, and secret-looking values are redacted by the
 event normalization path.
+
+Setting `[privacy] log_prompts = true` opts a journal into `user_message`
+events. Their text is stored exactly as sent, without redaction or truncation,
+so anything a person pastes into a prompt ends up in the journal. Project
+mirrors receive these events only with `[mirror] include_prompts = true`.
 
 ## License
 

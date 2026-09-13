@@ -12,6 +12,10 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 - `config.toml` in the journal root is now read: values are layered over the
   built-in defaults, and an invalid file or mistyped value falls back to the
   default with a warning.
+- Opt-in `user_message` event: with `[privacy] log_prompts = true` the journal
+  stores a person's message verbatim in `semantic.text`, bypassing redaction and
+  the free-text cap. Project mirrors receive it only with
+  `[mirror] include_prompts = true`.
 
 ### Security
 
@@ -48,6 +52,8 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 - Concurrent writers to one journal root no longer interleave long JSONL lines
   or write them out of order: the SQLite insert and JSONL append run under an
   advisory `flock`, and each line is appended as one `O_APPEND` buffer.
+- JSONL reading splits lines on `\n` only, so strings containing U+2028,
+  U+2029, or U+0085 no longer corrupt the line they are in.
 - Concurrent first use of a fresh journal no longer fails with
   `database is locked` while switching to WAL mode.
 

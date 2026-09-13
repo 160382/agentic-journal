@@ -15,8 +15,8 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX platforms have no flock
     fcntl = None
 
-from agentic_journal.config import FILE_MODE, ensure_config, journal_root, secure_dir, secure_file
-from agentic_journal.events import SCHEMA_VERSION
+from agentic_journal.config import FILE_MODE, ensure_config, journal_root, load_config, secure_dir, secure_file
+from agentic_journal.events import SCHEMA_VERSION, USER_MESSAGE_EVENT_TYPE, PromptLoggingDisabledError
 from agentic_journal.project_config import discover_project_mirror_configs, event_matches_project
 
 # Layout version of the SQLite database, tracked in PRAGMA user_version. It is
@@ -70,7 +70,9 @@ def read_jsonl_events(path: str | Path) -> Iterable[dict[str, Any]]:
     if not jsonl_path.exists():
         return []
     events = []
-    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+    # Split on "\n" only: str.splitlines() also breaks on U+2028, U+2029 and
+    # U+0085, which json.dumps(ensure_ascii=False) leaves unescaped in strings.
+    for line in jsonl_path.read_text(encoding="utf-8").split("\n"):
         if not line.strip():
             continue
         try:
@@ -320,7 +322,14 @@ def record_event(root: str | Path | None, event: dict[str, Any]) -> StoredEvent:
     Returns the JSONL path, whether the event was new, and its seq; a duplicate
     ``event_id`` reports the seq it was stored under the first time.
     """
-    stored = _persist(_root_path(root), event)
+    root_path = _root_path(root)
+    # Checked here rather than in persist_event: mirror roots carry their own
+    # default config.toml and are gated by the project's include_prompts.
+    if event.get("event_type") == USER_MESSAGE_EVENT_TYPE and not load_config(root_path)["privacy"]["log_prompts"]:
+        raise PromptLoggingDisabledError(
+            f"user_message rejected: [privacy] log_prompts is disabled in {root_path / 'config.toml'}"
+        )
+    stored = _persist(root_path, event)
     if stored.inserted:
         _mirror_event_to_project_roots(event)
     return stored
