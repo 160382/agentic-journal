@@ -61,6 +61,9 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
   In Progress. Corrupt JSONL lines are skipped on read. Malformed timestamps and
   oversized free-text semantic fields are rejected/capped at normalization.
 - The web token comparison no longer raises on a non-ASCII token.
+- The `mcp` dependency is capped below 2.0: mcp 2 renamed `FastMCP`, so fresh
+  installs that ignore `uv.lock` (pip, `uv tool install`) got an MCP server that
+  could not start.
 - Concurrent writers to one journal root no longer interleave long JSONL lines
   or write them out of order: the SQLite insert and JSONL append run under an
   advisory `flock`, and each line is appended as one `O_APPEND` buffer.
