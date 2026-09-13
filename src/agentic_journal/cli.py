@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
+# Only the modules every short command needs load here. Reports, diagnostics,
+# installers, and the web server are imported by their handlers, so hook-driven
+# commands such as `ingest` and `events` start quickly.
 from agentic_journal.config import journal_root, secure_dir, secure_file
-from agentic_journal.diagnostics import build_doctor_report, build_doctor_result
 from agentic_journal.events import (
     GIT_COMMIT_EVENT_TYPE,
     JOURNAL_MISSING_STATUS,
@@ -18,19 +22,20 @@ from agentic_journal.events import (
     normalize_event,
 )
 from agentic_journal.git_context import event_context, get_git_context, get_head_commit_files
-from agentic_journal.install import (
-    claude_mcp_snippet,
-    codex_mcp_snippet,
-    gemini_mcp_snippet,
-    install_agent_instructions,
-    install_git_hook,
-    install_shell_profile,
-    install_wrappers,
+from agentic_journal.storage import (
+    persist_event,
+    read_events_for_date,
+    read_events_for_session,
+    read_track_events,
+    record_event,
+    write_event,
 )
-from agentic_journal.project_config import event_matches_project, load_project_config
-from agentic_journal.report import build_provider_coverage, classify_daily_work, render_daily_report
-from agentic_journal.storage import persist_event, read_events_for_date, read_events_for_session, write_event
-from agentic_journal.web import run_web_server
+
+
+def run_web_server(*args, **kwargs):
+    from agentic_journal.web import run_web_server as _run_web_server
+
+    return _run_web_server(*args, **kwargs)
 
 
 def _add_event_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -134,6 +139,30 @@ def _add_mirror_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     sync.add_argument("--to", dest="date_to", help="Only sync events on or before this YYYY-MM-DD date")
 
 
+def _add_ingest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "ingest",
+        help="Write one JSON event read from stdin",
+        description=(
+            "Normalize and store one JSON event from stdin, then print "
+            '{"event_id", "inserted", "seq"}. Exit 0 when stored or already present, '
+            "2 when the event is invalid or refused by config, 1 on a storage error."
+        ),
+    )
+    parser.add_argument("--root", help="Write to this journal root")
+
+
+def _add_events_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("events", help="Print one agent track as JSONL in write order")
+    parser.add_argument("--root", help="Read events from this journal root")
+    parser.add_argument("--agent", required=True, help="Client that wrote the events, e.g. claude or codex")
+    parser.add_argument("--session-id", required=True)
+    track = parser.add_mutually_exclusive_group(required=True)
+    track.add_argument("--agent-id", help="Select a sub-agent track")
+    track.add_argument("--main", action="store_true", help="Select the main agent track (events without agent_id)")
+    parser.add_argument("--type", action="append", dest="event_types", help="Only this event type; repeatable")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-journal")
     subparsers = parser.add_subparsers(dest="command")
@@ -145,6 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_install_parser(subparsers)
     _add_guard_parser(subparsers)
     _add_mirror_parser(subparsers)
+    _add_ingest_parser(subparsers)
+    _add_events_parser(subparsers)
     return parser
 
 
@@ -239,6 +270,8 @@ def _root_from_args(args: argparse.Namespace) -> Path:
 
 
 def _handle_report(args: argparse.Namespace) -> int:
+    from agentic_journal.report import render_daily_report
+
     date = _report_date(args)
     root = _root_from_args(args)
     resolved_date, markdown, _ = render_daily_report(root, date)
@@ -258,6 +291,8 @@ def _handle_report(args: argparse.Namespace) -> int:
 
 
 def _handle_status(args: argparse.Namespace) -> int:
+    from agentic_journal.report import build_provider_coverage, classify_daily_work
+
     date = _report_date(args)
     events = read_events_for_date(_root_from_args(args), date)
     classified = classify_daily_work(events)
@@ -281,6 +316,8 @@ def _handle_status(args: argparse.Namespace) -> int:
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
+    from agentic_journal.diagnostics import build_doctor_report, build_doctor_result
+
     date = _report_date(args)
     result = build_doctor_result(_root_from_args(args), date)
     print(build_doctor_report(result), end="")
@@ -319,6 +356,8 @@ def _event_within_sync_range(event: dict, args: argparse.Namespace) -> bool:
 
 
 def _handle_mirror(args: argparse.Namespace) -> int:
+    from agentic_journal.project_config import event_matches_project, load_project_config
+
     if args.mirror_target == "sync":
         source_root = _root_from_args(args)
         config = load_project_config(args.config)
@@ -345,6 +384,16 @@ def _handle_mirror(args: argparse.Namespace) -> int:
 
 
 def _handle_install(args: argparse.Namespace) -> int:
+    from agentic_journal.install import (
+        claude_mcp_snippet,
+        codex_mcp_snippet,
+        gemini_mcp_snippet,
+        install_agent_instructions,
+        install_git_hook,
+        install_shell_profile,
+        install_wrappers,
+    )
+
     if args.install_target == "wrappers":
         installed = install_wrappers(journal_root())
         for agent, path in installed.items():
@@ -437,6 +486,41 @@ def _handle_guard(args: argparse.Namespace) -> int:
     return 2
 
 
+def _handle_ingest(args: argparse.Namespace) -> int:
+    try:
+        raw = json.loads(sys.stdin.buffer.read())
+        if not isinstance(raw, dict):
+            raise ValueError("expected one JSON object")
+        event = normalize_event(raw)
+        stored = record_event(_root_from_args(args), event)
+    except (ValueError, TypeError) as exc:
+        # Covers malformed JSON, schema violations, text that cannot be stored
+        # as UTF-8, and a user_message refused by [privacy] log_prompts.
+        print(f"agentic-journal ingest: rejected: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, sqlite3.Error) as exc:
+        print(f"agentic-journal ingest: storage error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"event_id": event["event_id"], "inserted": stored.inserted, "seq": stored.seq}))
+    return 0
+
+
+def _handle_events(args: argparse.Namespace) -> int:
+    events = read_track_events(
+        _root_from_args(args),
+        agent=args.agent,
+        session_id=args.session_id,
+        agent_id=None if args.main else args.agent_id,
+        event_types=args.event_types,
+    )
+    # Bytes, not text: stored user text must come out unchanged whatever the
+    # locale encoding of stdout is.
+    for event in events:
+        sys.stdout.buffer.write(json.dumps(event, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n")
+    sys.stdout.buffer.flush()
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     try:
@@ -459,6 +543,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _handle_guard(args)
     if args.command == "mirror":
         return _handle_mirror(args)
+    if args.command == "ingest":
+        return _handle_ingest(args)
+    if args.command == "events":
+        return _handle_events(args)
     parser.print_help()
     return 0
 

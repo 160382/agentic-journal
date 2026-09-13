@@ -556,3 +556,157 @@ def test_git_commit_event_records_head_commit_and_committed_files(tmp_path, monk
     event = json.loads(event_file.read_text().splitlines()[0])
     assert event["commit"] == head
     assert event["files_changed"] == ["tracked.txt"]
+
+
+def _run_ingest(monkeypatch, payload, *args):
+    import io
+
+    data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data), encoding="utf-8"))
+    return main(["ingest", *args])
+
+
+def _enable_prompts(root):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.toml").write_text("[privacy]\nlog_prompts = true\n", encoding="utf-8")
+
+
+def test_ingest_stores_event_and_reports_seq(tmp_path, monkeypatch, capsys):
+    _enable_prompts(tmp_path)
+    event = {
+        "event_type": "user_message",
+        "event_id": "msg-1",
+        "agent": "claude",
+        "session_id": "s1",
+        "turn_id": "prompt-1",
+        "semantic": {"text": "  keep me\r\n", "origin": "claude:cli"},
+    }
+
+    assert _run_ingest(monkeypatch, event, "--root", str(tmp_path)) == 0
+    assert json.loads(capsys.readouterr().out) == {"event_id": "msg-1", "inserted": True, "seq": 1}
+    assert _run_ingest(monkeypatch, event, "--root", str(tmp_path)) == 0
+    assert json.loads(capsys.readouterr().out) == {"event_id": "msg-1", "inserted": False, "seq": 1}
+
+    [stored] = read_events_for_date(tmp_path, None)
+    assert stored["semantic"]["text"] == "  keep me\r\n"
+    assert stored["turn_id"] == "prompt-1"
+
+
+def test_ingest_uses_journal_home_by_default(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+
+    assert _run_ingest(monkeypatch, {"event_type": "agent_start", "agent": "codex"}) == 0
+
+    assert json.loads(capsys.readouterr().out)["seq"] == 1
+    assert len(read_events_for_date(tmp_path, None)) == 1
+
+
+def test_ingest_rejects_invalid_input_with_exit_code_2(tmp_path, monkeypatch, capsys):
+    root = str(tmp_path)
+    cases = [
+        b"{not json",
+        b"[1, 2]",
+        json.dumps({"event_type": "unknown", "agent": "codex"}).encode(),
+        json.dumps({"event_type": "agent_start", "ts": "../../etc/passwd"}).encode(),
+        json.dumps({"event_type": "user_message", "agent": "claude", "semantic": {"text": "hi"}}).encode(),
+    ]
+
+    for payload in cases:
+        assert _run_ingest(monkeypatch, payload, "--root", root) == 2, payload
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "agentic-journal ingest: rejected:" in captured.err
+
+    assert read_events_for_date(tmp_path, None) == []
+
+
+def test_ingest_reports_storage_failure_with_exit_code_1(tmp_path, monkeypatch, capsys):
+    def fail_record(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("agentic_journal.cli.record_event", fail_record)
+
+    assert _run_ingest(monkeypatch, {"event_type": "agent_start", "agent": "codex"}, "--root", str(tmp_path)) == 1
+    assert "storage error: disk full" in capsys.readouterr().err
+
+
+def _track_event(root, event_id, event_type="semantic_note", agent="claude", session_id="s1", **updates):
+    from agentic_journal.events import normalize_event
+    from agentic_journal.storage import record_event
+
+    semantic = {"text": event_id} if event_type == "user_message" else {"note": event_id}
+    raw = {"event_id": event_id, "event_type": event_type, "agent": agent, "session_id": session_id, "semantic": semantic}
+    raw.update(updates)
+    record_event(root, normalize_event(raw))
+
+
+def test_events_prints_one_track_in_write_order(tmp_path, capsys):
+    _enable_prompts(tmp_path)
+    _track_event(tmp_path, "main-msg", "user_message", ts="2026-09-14T12:00:00+03:00")
+    _track_event(tmp_path, "sub-note", agent_id="a1")
+    _track_event(tmp_path, "main-note", ts="2026-09-14T11:00:00+03:00")
+    _track_event(tmp_path, "main-turn", "model_operation")
+    _track_event(tmp_path, "other-session", session_id="s2")
+    _track_event(tmp_path, "other-client", agent="codex")
+
+    assert main(["events", "--root", str(tmp_path), "--agent", "claude", "--session-id", "s1", "--main",
+                 "--type", "user_message", "--type", "semantic_note"]) == 0
+    assert [json.loads(line)["event_id"] for line in capsys.readouterr().out.splitlines()] == ["main-msg", "main-note"]
+
+    assert main(["events", "--root", str(tmp_path), "--agent", "claude", "--session-id", "s1", "--agent-id", "a1"]) == 0
+    assert [json.loads(line)["event_id"] for line in capsys.readouterr().out.splitlines()] == ["sub-note"]
+
+    assert main(["events", "--root", str(tmp_path), "--agent", "claude", "--session-id", "s1", "--main"]) == 0
+    assert [json.loads(line)["event_id"] for line in capsys.readouterr().out.splitlines()] == [
+        "main-msg",
+        "main-note",
+        "main-turn",
+    ]
+
+
+def test_events_requires_exactly_one_track_selector(tmp_path, capsys):
+    base = ["events", "--root", str(tmp_path), "--agent", "claude", "--session-id", "s1"]
+
+    assert main(base) == 2
+    assert main([*base, "--main", "--agent-id", "a1"]) == 2
+    capsys.readouterr()
+
+
+def test_events_output_keeps_user_text_bytes(tmp_path):
+    _enable_prompts(tmp_path)
+    text = "tab\there\r\nline sep\u2028end \U0001f468\u200d\U0001f469"
+    _track_event(tmp_path, "msg", "user_message", semantic={"text": text})
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"), "LC_ALL": "C", "PYTHONIOENCODING": "ascii"}
+
+    result = subprocess.run(
+        [sys.executable, "-m", "agentic_journal.cli", "events", "--root", str(tmp_path), "--agent", "claude",
+         "--session-id", "s1", "--main"],
+        env=env,
+        capture_output=True,
+        check=True,
+    )
+
+    [line] = result.stdout.split(b"\n")[:-1]
+    assert json.loads(line.decode("utf-8"))["semantic"]["text"] == text
+
+
+def test_ingest_does_not_import_web_report_or_mcp(tmp_path):
+    code = (
+        "import sys\n"
+        "from agentic_journal.cli import main\n"
+        "code = main(['ingest', '--root', sys.argv[1]])\n"
+        "heavy = ['agentic_journal.web', 'agentic_journal.report', 'agentic_journal.mcp_server', 'http.server', 'mcp']\n"
+        "print(sorted(name for name in heavy if name in sys.modules), file=sys.stderr)\n"
+        "sys.exit(code)\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        input=b'{"event_type": "agent_start", "agent": "codex"}',
+        env=env,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stderr.decode().strip().splitlines()[-1] == "[]"

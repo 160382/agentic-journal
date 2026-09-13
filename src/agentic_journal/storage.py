@@ -378,3 +378,29 @@ def read_events_for_session(root: str | Path | None, session_id: str) -> list[di
             (session_id,),
         ).fetchall()
     return _rows_to_events(rows)
+
+
+def read_track_events(
+    root: str | Path | None,
+    agent: str,
+    session_id: str,
+    agent_id: str | None,
+    event_types: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Read one agent track in write order.
+
+    A track is the events of one client session written by one agent: the
+    main agent when ``agent_id`` is None, otherwise the sub-agent with that id.
+    """
+    root_path = _root_path(root)
+    init_db(root_path)
+    query = "SELECT raw_json FROM events WHERE agent = ? AND session_id = ? AND agent_id IS ?"
+    params: list[str | None] = [agent, session_id, agent_id]
+    types = list(event_types or [])
+    if types:
+        query += f" AND event_type IN ({', '.join('?' for _ in types)})"
+        params.extend(types)
+    query += " ORDER BY seq"
+    with closing(connect(root_path)) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_events(rows)

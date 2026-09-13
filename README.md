@@ -250,6 +250,32 @@ the event directory and its git context, and `model`, `permission_mode`,
 `token_usage`, `turn_elapsed_ms`, `native_session_id`, `tool_use_id`, and
 `injected_by` go to `evidence`. Other runtime keys are dropped.
 
+## Hook Integration
+
+Client hooks can write events without the MCP server. `ingest` reads one JSON
+event from stdin, normalizes and stores it, and prints the stored identity:
+
+```bash
+printf '%s' '{"event_type":"model_operation","agent":"codex","session_id":"s1","turn_id":"t1"}' \
+  | agentic-journal ingest
+# {"event_id": "...", "inserted": true, "seq": 42}
+```
+
+Exit codes: `0` stored or already present (`inserted: false` keeps the original
+`seq`), `2` invalid event or refused by config (for example a `user_message`
+without `log_prompts`), `1` storage error.
+
+`events` prints one agent track as JSONL in `seq` order. A track is the events
+of one client session written by the main agent (`--main`) or by one sub-agent
+(`--agent-id`); `--type` narrows the event types and can repeat:
+
+```bash
+agentic-journal events --agent claude --session-id s1 --main --type user_message --type semantic_note
+```
+
+Both commands accept `--root` and avoid loading the report, web, and MCP
+modules, so they stay fast enough to run from hooks.
+
 ## Guarding Agent Sessions
 
 The wrapper flow exports an `AGENTIC_JOURNAL_SESSION_ID`, writes `agent_start` and

@@ -22,6 +22,10 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
   Events keep top-level `agent_id`, `agent_type`, and `turn_id`, and
   `token_usage` accepts cache-read, cache-write, reasoning-output, and total
   counters.
+- `agentic-journal ingest` stores one JSON event from stdin and prints its
+  `event_id`, `inserted`, and `seq`, with exit codes that separate invalid
+  input (2) from storage errors (1). `agentic-journal events` prints one agent
+  track (client, session, main agent or sub-agent) as JSONL in `seq` order.
 
 ### Security
 
@@ -66,6 +70,8 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 ### Changed
 
 - CI now runs the test and smoke suite on Python 3.11, 3.12, and 3.13.
+- The CLI imports reports, diagnostics, installers, and the web server only in
+  the commands that use them.
 - Events get a journal-wide `seq` and readers order by it instead of `ts`;
   default timestamps carry microseconds. The database layout moves to version 2
   (`seq`, `agent_id`, `turn_id` columns) with an in-place migration.
