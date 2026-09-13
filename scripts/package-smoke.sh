@@ -39,7 +39,7 @@ assert "Agentic Journal Live" in html
 assert "X-Agent-Journal-Token" in html
 PY
 
-"$PYTHON" - <<'PY'
+AGENTIC_JOURNAL_HOME="$JOURNAL_HOME" "$PYTHON" - <<'PY'
 from agentic_journal.mcp_server import create_mcp_server
 
 server = create_mcp_server()

@@ -188,7 +188,8 @@ def test_mcp_tools_accept_legacy_session_env(tmp_path, monkeypatch):
     assert event["session_id"] == "legacy-session"
 
 
-def test_create_mcp_server_has_expected_name_or_clear_dependency_error():
+def test_create_mcp_server_has_expected_name_or_clear_dependency_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
     try:
         server = create_mcp_server()
     except RuntimeError as exc:
@@ -197,7 +198,8 @@ def test_create_mcp_server_has_expected_name_or_clear_dependency_error():
         assert getattr(server, "name", None) == "agentic-journal"
 
 
-def test_create_mcp_server_registers_expected_tool_names():
+def test_create_mcp_server_registers_expected_tool_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
     try:
         server = create_mcp_server()
     except RuntimeError:
@@ -299,7 +301,8 @@ def test_journal_note_without_runtime_keeps_plain_event(tmp_path):
     assert not {"agent_id", "agent_type", "turn_id"} & set(event)
 
 
-def test_journal_note_tool_schema_and_annotations():
+def test_journal_note_tool_schema_and_annotations(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
     server = create_mcp_server()
     tool = {tool.name: tool for tool in asyncio.run(server.list_tools())}["journal_note"]
 
@@ -339,3 +342,47 @@ def test_journal_note_tool_reports_storage_failure_as_tool_error(tmp_path, monke
 
     with pytest.raises(ToolError, match="disk full"):
         asyncio.run(server.call_tool("journal_note", {"note": "n"}))
+
+
+ALL_TOOL_NAMES = {
+    "journal_note",
+    "journal_session_summary",
+    "journal_task_completed",
+    "journal_task_blocked",
+    "journal_model_operation",
+    "journal_daily_report",
+}
+
+
+def _server_with_config(tmp_path, monkeypatch, config_text):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(config_text, encoding="utf-8")
+    return create_mcp_server()
+
+
+def test_mcp_tools_config_limits_published_tools(tmp_path, monkeypatch):
+    server = _server_with_config(tmp_path, monkeypatch, '[mcp]\ntools = ["journal_note"]\n')
+
+    assert set(server._tool_manager._tools) == {"journal_note"}
+    [tool] = asyncio.run(server.list_tools())
+    assert tool.annotations.destructiveHint is False
+
+
+def test_mcp_without_tools_config_publishes_every_tool(tmp_path, monkeypatch):
+    server = _server_with_config(tmp_path, monkeypatch, "[privacy]\nlog_prompts = false\n")
+
+    assert set(server._tool_manager._tools) == ALL_TOOL_NAMES
+
+
+def test_mcp_tools_config_reports_unknown_names(tmp_path, monkeypatch, capsys):
+    server = _server_with_config(tmp_path, monkeypatch, '[mcp]\ntools = ["journal_note", "journal_delete"]\n')
+
+    assert set(server._tool_manager._tools) == {"journal_note"}
+    assert "unknown [mcp] tools: journal_delete" in capsys.readouterr().err
+
+
+def test_mcp_tools_config_of_wrong_type_publishes_every_tool(tmp_path, monkeypatch, capsys):
+    server = _server_with_config(tmp_path, monkeypatch, '[mcp]\ntools = "journal_note"\n')
+
+    assert set(server._tool_manager._tools) == ALL_TOOL_NAMES
+    assert "expected a list of tool names" in capsys.readouterr().err

@@ -234,6 +234,13 @@ Available MCP tools:
 - `journal_model_operation`
 - `journal_daily_report`
 
+To publish only some of them, list their names in `config.toml`:
+
+```toml
+[mcp]
+tools = ["journal_note"]
+```
+
 MCP writes inherit `AGENTIC_JOURNAL_SESSION_ID` when present and attach the
 current working directory plus git repo, branch, and commit context. This keeps
 MCP outcome events correlated with wrapper `agent_start` / `agent_end` events
@@ -354,6 +361,7 @@ Keys that change behavior:
 | Key | Default | Effect |
 |---|---|---|
 | `[privacy] log_prompts` | `false` | Accept `user_message` events and store their `semantic.text` verbatim. |
+| `[mcp] tools` | all tools | List of MCP tool names `agentic-journal-mcp` publishes; unknown names are skipped with a warning. |
 
 ## Development
 

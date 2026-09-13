@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from agentic_journal.config import journal_root, load_config
 from agentic_journal.events import (
     MODEL_OPERATION_EVENT_TYPE,
     SEMANTIC_NOTE_EVENT_TYPE,
@@ -252,6 +254,24 @@ def journal_daily_report(journal_home: str | Path | None = None, date: str | Non
     return f"report: {path}"
 
 
+def enabled_tool_names(available: Sequence[str]) -> set[str]:
+    """Pick the tools to publish from ``[mcp] tools`` in the journal config.
+
+    Without the key every tool is published. A value that is not a list of
+    names is ignored with a warning, and unknown names are reported and skipped.
+    """
+    configured = load_config(journal_root()).get("mcp", {}).get("tools")
+    if configured is None:
+        return set(available)
+    if not isinstance(configured, list) or not all(isinstance(name, str) for name in configured):
+        print("agentic-journal-mcp: ignoring [mcp] tools: expected a list of tool names", file=sys.stderr)
+        return set(available)
+    unknown = sorted(set(configured) - set(available))
+    if unknown:
+        print(f"agentic-journal-mcp: ignoring unknown [mcp] tools: {', '.join(unknown)}", file=sys.stderr)
+    return set(configured) & set(available)
+
+
 def create_mcp_server():
     try:
         from mcp.server.fastmcp import FastMCP
@@ -262,15 +282,6 @@ def create_mcp_server():
 
     server = FastMCP("agentic-journal")
 
-    @server.tool(
-        name="journal_note",
-        annotations=ToolAnnotations(
-            readOnlyHint=False,
-            destructiveHint=False,
-            idempotentHint=False,
-            openWorldHint=False,
-        ),
-    )
     def journal_note_tool(
         note: str,
         category: str = "",
@@ -291,7 +302,6 @@ def create_mcp_server():
             runtime=runtime,
         )
 
-    @server.tool(name="journal_session_summary")
     def journal_session_summary_tool(
         agent: str = "unknown",
         session_id: str = "",
@@ -307,7 +317,6 @@ def create_mcp_server():
             outcome=outcome,
         )
 
-    @server.tool(name="journal_task_completed")
     def journal_task_completed_tool(
         agent: str = "unknown",
         task_id: str = "",
@@ -316,7 +325,6 @@ def create_mcp_server():
     ) -> str:
         return journal_task_completed(agent=agent, task_id=task_id, note=note, session_id=session_id or None)
 
-    @server.tool(name="journal_task_blocked")
     def journal_task_blocked_tool(
         agent: str = "unknown",
         task_id: str = "",
@@ -325,7 +333,6 @@ def create_mcp_server():
     ) -> str:
         return journal_task_blocked(agent=agent, task_id=task_id, reason=reason, session_id=session_id or None)
 
-    @server.tool(name="journal_model_operation")
     def journal_model_operation_tool(
         agent: str = "unknown",
         session_id: str = "",
@@ -359,10 +366,25 @@ def create_mcp_server():
             error_code=error_code,
         )
 
-    @server.tool(name="journal_daily_report")
     def journal_daily_report_tool(date: str = "") -> str:
         return journal_daily_report(date=date or None)
 
+    tools = [
+        (
+            "journal_note",
+            journal_note_tool,
+            ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
+        ),
+        ("journal_session_summary", journal_session_summary_tool, None),
+        ("journal_task_completed", journal_task_completed_tool, None),
+        ("journal_task_blocked", journal_task_blocked_tool, None),
+        ("journal_model_operation", journal_model_operation_tool, None),
+        ("journal_daily_report", journal_daily_report_tool, None),
+    ]
+    enabled = enabled_tool_names([name for name, _, _ in tools])
+    for name, function, annotations in tools:
+        if name in enabled:
+            server.add_tool(function, name=name, annotations=annotations)
     return server
 
 

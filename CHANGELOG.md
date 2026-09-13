@@ -26,6 +26,8 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
   `event_id`, `inserted`, and `seq`, with exit codes that separate invalid
   input (2) from storage errors (1). `agentic-journal events` prints one agent
   track (client, session, main agent or sub-agent) as JSONL in `seq` order.
+- `[mcp] tools` in `config.toml` limits which tools `agentic-journal-mcp`
+  publishes; without it every tool is published as before.
 
 ### Security
 
