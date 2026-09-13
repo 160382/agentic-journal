@@ -7,6 +7,12 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 
 ## [Unreleased]
 
+### Added
+
+- `config.toml` in the journal root is now read: values are layered over the
+  built-in defaults, and an invalid file or mistyped value falls back to the
+  default with a warning.
+
 ### Security
 
 - Redaction now detects common secret formats by value (AWS keys, GitHub/GitLab

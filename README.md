@@ -303,6 +303,14 @@ Reports are written to:
 See [docs/event-schema.md](docs/event-schema.md) for event fields, correlation
 rules, and privacy expectations.
 
+## Configuration
+
+The first write creates `~/.agentic-journal/config.toml` with defaults; an
+existing file is never overwritten. Readers layer the file over built-in
+defaults. A file that cannot be parsed, or a value whose type differs from its
+default, is ignored with a warning on stderr, so a broken config never blocks
+event writes.
+
 ## Development
 
 Run tests:
