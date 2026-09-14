@@ -9,6 +9,7 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 
 ### Added
 
+- Managed `journal_note` hook mode with visible `note`/`category` arguments only, `agentic-journal note-bridge` for full runtime storage, and private one-use confirmations that keep event IDs out of MCP results.
 - `config.toml` in the journal root is now read: values are layered over the
   built-in defaults, and an invalid file or mistyped value falls back to the
   default with a warning.

@@ -152,6 +152,10 @@ def _add_ingest_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     parser.add_argument("--root", help="Write to this journal root")
 
 
+def _add_note_bridge_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    subparsers.add_parser("note-bridge", help="Record a hook note from JSON on stdin")
+
+
 def _add_events_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("events", help="Print one agent track as JSONL in write order")
     parser.add_argument("--root", help="Read events from this journal root")
@@ -175,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_guard_parser(subparsers)
     _add_mirror_parser(subparsers)
     _add_ingest_parser(subparsers)
+    _add_note_bridge_parser(subparsers)
     _add_events_parser(subparsers)
     return parser
 
@@ -505,6 +510,36 @@ def _handle_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_note_bridge() -> int:
+    from agentic_journal.mcp_server import journal_note
+    from agentic_journal.note_bridge import CLIENT_NAMES, add_receipt, client_instance
+
+    try:
+        payload = json.loads(sys.stdin.buffer.read())
+        if not isinstance(payload, dict):
+            raise ValueError("expected one JSON object")
+        note, category = payload.get("note"), payload.get("category", "")
+        session_id, runtime = payload.get("session_id"), payload.get("runtime")
+        if not isinstance(note, str) or not note.strip() or not isinstance(category, str):
+            raise ValueError("note must be nonempty and category must be a string")
+        if not isinstance(session_id, str) or not isinstance(runtime, dict) \
+                or runtime.get("client") not in CLIENT_NAMES:
+            raise ValueError("session_id and client runtime are required")
+        instance = client_instance()  # Fail before writing when the clients cannot share receipts.
+        result = journal_note(note=note, category=category, session_id=session_id, runtime=runtime)
+        if not result.startswith("logged "):
+            raise ValueError(result)
+        add_receipt(instance, note, category, result.removeprefix("logged "))
+    except (ValueError, TypeError) as exc:
+        print(f"agentic-journal note-bridge: rejected: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        print(f"agentic-journal note-bridge: storage error: {exc}", file=sys.stderr)
+        return 1
+    print(result)
+    return 0
+
+
 def _handle_events(args: argparse.Namespace) -> int:
     events = read_track_events(
         _root_from_args(args),
@@ -545,6 +580,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _handle_mirror(args)
     if args.command == "ingest":
         return _handle_ingest(args)
+    if args.command == "note-bridge":
+        return _handle_note_bridge()
     if args.command == "events":
         return _handle_events(args)
     parser.print_help()

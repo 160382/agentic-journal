@@ -246,16 +246,9 @@ current working directory plus git repo, branch, and commit context. This keeps
 MCP outcome events correlated with wrapper `agent_start` / `agent_end` events
 and prevents the session guard from reporting false missing-summary risks.
 
-`journal_note(note, category="", agent="unknown", session_id="", runtime=None)`
-returns `logged <event_id>`; a storage failure is returned as a tool error.
-`category` is a free-form slug stored in `semantic.category` and cut to 64
-characters. `runtime` is meant for client hooks that rewrite the tool call
-before it reaches the server, not for the model: `client` replaces `agent`,
-`agent_id`, `agent_type`, and `turn_id` go to the event top level, `cwd` sets
-the event directory and its git context, and `model`, `permission_mode`,
-`collaboration_mode`, `effort`, `usage_scope`, `usage_status`, `stats_error`,
-`token_usage`, `turn_elapsed_ms`, `native_session_id`, `tool_use_id`, and
-`injected_by` go to `evidence`. Other runtime keys are dropped.
+By default, `journal_note(note, category="", agent="unknown", session_id="", runtime=None)` returns `logged <event_id>`; a storage failure is returned as a tool error. With `AGENTIC_JOURNAL_REQUIRE_HOOK=1`, the managed hook profile exposes only `note` and `category`, and a successful call returns an empty result. The hook first saves the note through `agentic-journal note-bridge`; the MCP tool consumes its short-lived confirmation instead of writing again.
+
+`category` is a free-form slug stored in `semantic.category` and cut to 64 characters. `runtime` is supplied by client hooks through `note-bridge`, not by the model: `client` replaces `agent`; `agent_id`, `agent_type`, and `turn_id` go to the event top level; `cwd` sets the event directory and its git context; and `model`, `permission_mode`, `collaboration_mode`, `effort`, `usage_scope`, `usage_status`, `stats_error`, `token_usage`, `turn_elapsed_ms`, `native_session_id`, `tool_use_id`, and `injected_by` go to `evidence`. Other runtime keys are dropped.
 
 ## Hook Integration
 
@@ -272,6 +265,17 @@ Exit codes: `0` stored or already present (`inserted: false` keeps the original
 `seq`), `2` invalid event or refused by config (for example a `user_message`
 without `log_prompts`), `1` storage error.
 
+For semantic notes in the managed hook profile, `note-bridge` reads one JSON object from stdin with `note`, optional `category`, `session_id`, and a hook-supplied `runtime` object whose `client` is `codex` or `claude`. It records the note and creates a private one-use confirmation for the subsequent MCP call:
+
+```bash
+# Run inside a Codex or Claude PreToolUse hook; a plain shell has no client identity.
+printf '%s' '{"note":"Checked the source. Confirmed the path.","category":"check","session_id":"s1","runtime":{"client":"codex"}}' \
+  | agentic-journal note-bridge
+# logged <event_id>
+```
+
+The hook captures this output; the MCP tool does not display the event ID. Use the same journal root for the hook and server. A failed hook should stop the MCP call. If the MCP tool reports that confirmation is missing, inspect the journal before retrying: the note may already have been saved. Confirmations expire after 30 seconds. If an earlier MCP call was interrupted before confirmation and the hook is entirely absent on a repeat with the same note and category, that old confirmation may still be consumed. Linux identifies the client process through `/proc`; macOS uses the POSIX `ps` process table.
+
 `events` prints one agent track as JSONL in `seq` order. A track is the events
 of one client session written by the main agent (`--main`) or by one sub-agent
 (`--agent-id`); `--type` narrows the event types and can repeat:
@@ -280,8 +284,7 @@ of one client session written by the main agent (`--main`) or by one sub-agent
 agentic-journal events --agent claude --session-id s1 --main --type user_message --type semantic_note
 ```
 
-Both commands accept `--root` and avoid loading the report, web, and MCP
-modules, so they stay fast enough to run from hooks.
+`ingest` and `events` accept `--root` and avoid loading the report, web, and MCP modules, so they stay fast enough to run from hooks.
 
 ## Guarding Agent Sessions
 

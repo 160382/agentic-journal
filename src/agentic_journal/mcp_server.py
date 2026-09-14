@@ -282,25 +282,36 @@ def create_mcp_server():
 
     server = FastMCP("agentic-journal")
 
-    def journal_note_tool(
-        note: str,
-        category: str = "",
-        agent: str = "unknown",
-        session_id: str = "",
-        runtime: dict[str, Any] | None = None,
-    ) -> str:
-        """Record a short semantic note about the agent's work.
+    if os.environ.get("AGENTIC_JOURNAL_REQUIRE_HOOK") == "1":
+        from mcp.server.fastmcp.exceptions import ToolError
 
-        `category` is an optional short slug. `runtime` carries metadata that
-        client hooks inject; agents leave it empty.
-        """
-        return journal_note(
-            agent=agent,
-            note=note,
-            session_id=session_id or None,
-            category=category,
-            runtime=runtime,
-        )
+        from agentic_journal.note_bridge import consume_receipt
+
+        def journal_note_tool(note: str, category: str = "") -> str:
+            """Record a two- or three-sentence note through the client hook.
+
+            Use category `hypothesis` before a planned check, then `check` for
+            its outcome. Pass only note and category; the hook adds metadata.
+            """
+            if not consume_receipt(note, category):
+                raise ToolError("journal hook did not confirm this call; check the journal before retrying")
+            return ""  # Keep event ids and runtime metadata out of the chat.
+    else:
+        def journal_note_tool(
+            note: str,
+            category: str = "",
+            agent: str = "unknown",
+            session_id: str = "",
+            runtime: dict[str, Any] | None = None,
+        ) -> str:
+            """Record a semantic note; hooks supply runtime, agents leave it empty."""
+            return journal_note(
+                agent=agent,
+                note=note,
+                session_id=session_id or None,
+                category=category,
+                runtime=runtime,
+            )
 
     def journal_session_summary_tool(
         agent: str = "unknown",
