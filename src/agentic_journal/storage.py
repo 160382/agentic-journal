@@ -11,6 +11,8 @@ import unicodedata
 from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import datetime
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +33,8 @@ WRITE_LOCK_FILENAME = ".write.lock"
 BUSY_TIMEOUT_SECONDS = 30.0
 MIRROR_LAYOUT_LEGACY = 1
 MIRROR_LAYOUT_SESSION = 2
-SESSION_SLUG_MAX_LENGTH = 80
+SESSION_SLUG_MAX_BYTES = 160
+RESERVED_SESSION_SLUGS = {"unscoped"}
 
 SESSION_SOURCE_RANK = {
     "id": 0,
@@ -76,10 +79,17 @@ def _session_hash(agent: str, session_id: str) -> str:
     return hashlib.sha256(f"{agent}\0{session_id}".encode("utf-8")).hexdigest()[:8]
 
 
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", "ignore")
+
+
 def session_slug(name: str) -> str:
     normalized = unicodedata.normalize("NFC", name).casefold()
     slug = re.sub(r"[^\w]+", "-", normalized, flags=re.UNICODE).strip("-_.")
-    return slug[:SESSION_SLUG_MAX_LENGTH].rstrip("-_.")
+    return _truncate_utf8(slug, SESSION_SLUG_MAX_BYTES).rstrip("-_.")
 
 
 def _fallback_name(agent: str, session_id: str) -> str:
@@ -288,13 +298,42 @@ def init_db(root: str | Path | None = None) -> Path:
     return path
 
 
-def _unique_slug(conn: sqlite3.Connection, base: str, agent: str, session_id: str) -> str:
+def _slug_available(conn: sqlite3.Connection, slug: str, agent: str, session_id: str) -> bool:
+    if slug in RESERVED_SESSION_SLUGS:
+        return False
     owner = conn.execute(
-        "SELECT agent, session_id FROM sessions WHERE file_slug = ?", (base,)
+        "SELECT agent, session_id FROM sessions WHERE file_slug = ?", (slug,)
     ).fetchone()
-    if owner is None or (owner["agent"], owner["session_id"]) == (agent, session_id):
+    return owner is None or (owner["agent"], owner["session_id"]) == (agent, session_id)
+
+
+def _slug_with_suffix(base: str, suffix: str) -> str:
+    budget = SESSION_SLUG_MAX_BYTES - len(suffix.encode("utf-8"))
+    stem = _truncate_utf8(base, budget).rstrip("-_.") or "session"
+    return f"{stem}{suffix}"
+
+
+def _unique_slug(conn: sqlite3.Connection, base: str, agent: str, session_id: str) -> str:
+    if _slug_available(conn, base, agent, session_id):
         return base
-    return f"{base}-{_session_hash(agent, session_id)}"
+    digest = hashlib.sha256(f"{agent}\0{session_id}".encode("utf-8")).hexdigest()
+    for width in range(8, len(digest) + 1, 8):
+        candidate = _slug_with_suffix(base, f"-{digest[:width]}")
+        if _slug_available(conn, candidate, agent, session_id):
+            return candidate
+    for ordinal in count(2):
+        candidate = _slug_with_suffix(base, f"-{digest}-{ordinal}")
+        if _slug_available(conn, candidate, agent, session_id):
+            return candidate
+    raise AssertionError("unreachable")
+
+
+def _agent_key(value: Any) -> str:
+    return str(value or "unknown")
+
+
+def _timestamp_value(value: str) -> float:
+    return datetime.fromisoformat(value).timestamp()
 
 
 def _canonical_session(
@@ -306,7 +345,7 @@ def _canonical_session(
         event.pop("session_name_source", None)
         return "unscoped", None, None, False
 
-    agent = str(event.get("agent") or "unknown")
+    agent = _agent_key(event.get("agent"))
     incoming_name = event.get("session_name")
     if not isinstance(incoming_name, str) or not incoming_name.strip():
         incoming_name = _fallback_name(agent, session_id)
@@ -330,9 +369,16 @@ def _canonical_session(
         "claude-ai-title",
         "claude-slug",
     }
+    stale_same_rank = (
+        current is not None
+        and incoming_rank == current["source_rank"]
+        and same_rank_can_rename
+        and _timestamp_value(event["ts"]) < _timestamp_value(current["updated_at"])
+    )
     if current is not None and (
         incoming_rank < current["source_rank"]
         or incoming_rank == current["source_rank"] and not same_rank_can_rename
+        or stale_same_rank
     ):
         name = current["session_name"]
         source = current["session_name_source"]
@@ -390,14 +436,14 @@ def _insert_row(conn: sqlite3.Connection, event: dict[str, Any]) -> InsertResult
                 if existing["session_id"]:
                     current = conn.execute(
                         "SELECT file_slug FROM sessions WHERE agent = ? AND session_id = ?",
-                        (existing["agent"], existing["session_id"]),
+                        (_agent_key(existing["agent"]), existing["session_id"]),
                     ).fetchone()
                 if current is not None:
                     slug = current["file_slug"]
                 else:
                     slug = session_slug(existing["session_name"] or "")
                     if not slug and existing["session_id"]:
-                        slug = _fallback_name(str(existing["agent"] or "unknown"), existing["session_id"])
+                        slug = _fallback_name(_agent_key(existing["agent"]), existing["session_id"])
                     slug = slug or "unscoped"
             return InsertResult(
                 False,
@@ -470,7 +516,7 @@ def _restore_session(root: str | Path, event: dict[str, Any], result: InsertResu
     session_id = event.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
-    agent = str(event.get("agent") or "unknown")
+    agent = _agent_key(event.get("agent"))
     with closing(connect(root)) as conn, _immediate_transaction(conn):
         if result.session_created:
             conn.execute(
@@ -530,7 +576,7 @@ def _rewrite_session_jsonl(
 ) -> None:
     with closing(connect(root_path)) as conn:
         rows = conn.execute(
-            "SELECT raw_json FROM events WHERE agent = ? AND session_id = ? "
+            "SELECT raw_json FROM events WHERE COALESCE(NULLIF(agent, ''), 'unknown') = ? AND session_id = ? "
             "AND mirror_layout = ? ORDER BY seq",
             (agent, session_id, MIRROR_LAYOUT_SESSION),
         ).fetchall()
@@ -556,12 +602,13 @@ def _remove_rewritten_targets(root_path: Path, event: dict[str, Any], result: In
         return
     dates = {_date_from_ts(event["ts"])}
     session_id = event.get("session_id")
-    agent = str(event.get("agent") or "unknown")
+    agent = _agent_key(event.get("agent"))
     if isinstance(session_id, str) and session_id:
         with closing(connect(root_path)) as conn:
             rows = conn.execute(
                 "SELECT DISTINCT substr(ts, 1, 10) AS date FROM events "
-                "WHERE agent = ? AND session_id = ? AND mirror_layout = ?",
+                "WHERE COALESCE(NULLIF(agent, ''), 'unknown') = ? "
+                "AND session_id = ? AND mirror_layout = ?",
                 (agent, session_id, MIRROR_LAYOUT_SESSION),
             ).fetchall()
         dates.update(row["date"] for row in rows)
@@ -592,7 +639,7 @@ def _persist(root_path: Path, event: dict[str, Any]) -> StoredEvent:
             if result.previous_slug is not None:
                 _rewrite_session_jsonl(
                     root_path,
-                    str(event.get("agent") or "unknown"),
+                    _agent_key(event.get("agent")),
                     str(event.get("session_id") or ""),
                     result.slug,
                     result.previous_slug,

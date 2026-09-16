@@ -155,6 +155,96 @@ def test_equal_session_slugs_get_stable_hash_suffix(tmp_path):
     assert first != second
 
 
+def test_session_slug_respects_utf8_filename_budget(tmp_path):
+    first = write_event(
+        tmp_path,
+        _event("e1", session_id="s1", session_name="界" * 80, session_name_source="prompt"),
+    )
+    renamed = write_event(
+        tmp_path,
+        _event("e2", session_id="s1", session_name="名" * 80,
+               session_name_source="codex-thread"),
+    )
+
+    assert not first.exists()
+    assert renamed.exists()
+    assert len(renamed.stem.removeprefix("2026-05-31-").encode("utf-8")) <= storage.SESSION_SLUG_MAX_BYTES
+
+
+def test_reserved_and_second_order_slug_collisions_are_isolated(tmp_path):
+    unscoped = write_event(tmp_path, _event("plain"))
+    reserved = write_event(
+        tmp_path,
+        _event("reserved", session_id="reserved", session_name="Unscoped",
+               session_name_source="prompt"),
+    )
+    renamed = write_event(
+        tmp_path,
+        _event("reserved-renamed", session_id="reserved", session_name="Renamed",
+               session_name_source="codex-thread"),
+    )
+    digest = storage._session_hash("codex", "target")
+    base = write_event(
+        tmp_path,
+        _event("base", session_id="base", session_name="Same title",
+               session_name_source="codex-thread"),
+    )
+    occupied_suffix = write_event(
+        tmp_path,
+        _event("suffix", session_id="suffix", session_name=f"same-title-{digest}",
+               session_name_source="codex-thread"),
+    )
+    target = write_event(
+        tmp_path,
+        _event("target", session_id="target", session_name="Same title",
+               session_name_source="codex-thread"),
+    )
+
+    assert unscoped.name == "2026-05-31-unscoped.jsonl"
+    assert reserved != unscoped
+    assert not reserved.exists()
+    assert [event["event_id"] for event in read_jsonl_events(renamed)] == ["reserved", "reserved-renamed"]
+    assert base.name == "2026-05-31-same-title.jsonl"
+    assert occupied_suffix.name == f"2026-05-31-same-title-{digest}.jsonl"
+    assert target not in {base, occupied_suffix}
+    assert all(path.exists() for path in (unscoped, renamed, base, occupied_suffix, target))
+
+
+def test_agentless_session_rename_rebuilds_its_jsonl(tmp_path):
+    first = write_event(
+        tmp_path,
+        _event("e1", agent=None, session_id="s1", session_name="Prompt",
+               session_name_source="prompt"),
+    )
+    renamed = write_event(
+        tmp_path,
+        _event("e2", agent=None, session_id="s1", session_name="Native",
+               session_name_source="codex-thread"),
+    )
+
+    assert not first.exists()
+    assert [event["event_id"] for event in read_jsonl_events(renamed)] == ["e1", "e2"]
+
+
+def test_older_native_event_does_not_roll_session_name_back(tmp_path):
+    current = write_event(
+        tmp_path,
+        _event("newer", ts="2026-05-31T12:00:00+03:00", session_id="s1",
+               session_name="New", session_name_source="codex-thread"),
+    )
+    backfill = write_event(
+        tmp_path,
+        _event("older", ts="2026-05-31T11:00:00+03:00", session_id="s1",
+               session_name="Old", session_name_source="codex-thread"),
+    )
+
+    assert backfill == current
+    assert {event["session_name"] for event in read_jsonl_events(current)} == {"New"}
+    with closing(storage.connect(tmp_path)) as conn:
+        row = conn.execute("SELECT session_name, updated_at FROM sessions").fetchone()
+    assert tuple(row) == ("New", "2026-05-31T12:00:00+03:00")
+
+
 def test_session_spanning_midnight_gets_one_file_per_date(tmp_path):
     root = tmp_path / "journal"
     first = write_event(
