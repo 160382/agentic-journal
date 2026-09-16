@@ -288,10 +288,16 @@ def create_mcp_server():
         from agentic_journal.note_bridge import consume_receipt
 
         def journal_note_tool(note: str, category: str = "") -> str:
-            """Record a two- or three-sentence note through the client hook.
+            """Record a concise work note through the client hook.
 
-            Use category `hypothesis` before a planned check, then `check` for
-            its outcome. Pass only note and category; the hook adds metadata.
+            Use `scope` for task boundaries, `finding` for research results,
+            `decision` for choices, `action` for performed work, and `correction`
+            for revised claims. Record a significant `hypothesis` before testing
+            it, then `verification` with the outcome and limits; routine checks
+            need no invented hypothesis. Use `checkpoint` for a substantial
+            stage's result, actual state, evidence limits, and open next steps.
+            It may include the final verification without a duplicate note.
+            Pass only note and category; the hook adds metadata.
             """
             if not consume_receipt(note, category):
                 raise ToolError("journal hook did not confirm this call; check the journal before retrying")
