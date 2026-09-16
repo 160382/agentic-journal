@@ -35,6 +35,23 @@ def test_journal_note_writes_semantic_note(tmp_path):
     assert events[0]["semantic"]["note"] == "Investigated TASK-1"
 
 
+def test_journal_note_accepts_hook_owned_session_identity(tmp_path):
+    journal_note(
+        journal_home=tmp_path,
+        note="Investigated",
+        session_id="s1",
+        runtime={
+            "client": "codex",
+            "session_name": "Logging engine",
+            "session_name_source": "codex-thread",
+        },
+    )
+
+    [event] = read_events_for_date(tmp_path, None)
+    assert event["session_name"] == "Logging engine"
+    assert event["session_name_source"] == "codex-thread"
+
+
 def test_journal_note_skips_blank_note(tmp_path):
     result = journal_note(journal_home=tmp_path, agent="codex", note="   ")
 

@@ -248,7 +248,7 @@ and prevents the session guard from reporting false missing-summary risks.
 
 By default, `journal_note(note, category="", agent="unknown", session_id="", runtime=None)` returns `logged <event_id>`; a storage failure is returned as a tool error. With `AGENTIC_JOURNAL_REQUIRE_HOOK=1`, the managed hook profile exposes only `note` and `category`, and a successful call returns an empty result. The hook first saves the note through `agentic-journal note-bridge`; the MCP tool consumes its short-lived confirmation instead of writing again.
 
-`category` is a free-form slug stored in `semantic.category` and cut to 64 characters. `runtime` is supplied by client hooks through `note-bridge`, not by the model: `client` replaces `agent`; `agent_id`, `agent_type`, and `turn_id` go to the event top level; `cwd` sets the event directory and its git context; and `model`, `permission_mode`, `collaboration_mode`, `effort`, `usage_scope`, `usage_status`, `stats_error`, `token_usage`, `turn_elapsed_ms`, `native_session_id`, `tool_use_id`, and `injected_by` go to `evidence`. Other runtime keys are dropped.
+`category` is a free-form slug stored in `semantic.category` and cut to 64 characters. `runtime` is supplied by client hooks through `note-bridge`, not by the model: `client` replaces `agent`; `agent_id`, `agent_type`, `turn_id`, `session_name`, and `session_name_source` go to the event top level; `cwd` sets the event directory and its git context; and `model`, `permission_mode`, `collaboration_mode`, `effort`, `usage_scope`, `usage_status`, `stats_error`, `token_usage`, `turn_elapsed_ms`, `native_session_id`, `tool_use_id`, and `injected_by` go to `evidence`. Other runtime keys are dropped.
 
 ## Hook Integration
 
@@ -274,7 +274,7 @@ printf '%s' '{"note":"Checked the source. Confirmed the path.","category":"check
 # logged <event_id>
 ```
 
-The hook captures this output; the MCP tool does not display the event ID. Use the same journal root for the hook and server. A failed hook should stop the MCP call. If the MCP tool reports that confirmation is missing, inspect the journal before retrying: the note may already have been saved. Confirmations expire after 30 seconds. If an earlier MCP call was interrupted before confirmation and the hook is entirely absent on a repeat with the same note and category, that old confirmation may still be consumed. Linux identifies the client process through `/proc`; macOS uses the POSIX `ps` process table.
+The hook captures this output; the MCP tool does not display the event ID. Use the same journal root for the hook and server. A failed hook should stop the MCP call. If the MCP tool reports that confirmation is missing, inspect the journal before retrying: the note may already have been saved. Confirmations are one-use rows in the owner-only SQLite database and expire after 30 seconds; expired rows are removed on the next bridge operation. Linux identifies the client process through `/proc`; macOS uses the POSIX `ps` process table. Releases before the SQLite bridge used `note-bridge/*.json` and `*.lock`; current versions remove expired legacy pairs opportunistically and create no new files there.
 
 `events` prints one agent track as JSONL in `seq` order. A track is the events
 of one client session written by the main agent (`--main`) or by one sub-agent
@@ -332,14 +332,19 @@ sends it as the `X-Agent-Journal-Token` header for `/api/events` requests.
 
 Agentic Journal writes each event to both:
 
-- `~/.agentic-journal/events/YYYY-MM-DD.jsonl`
+- `~/.agentic-journal/events/YYYY-MM-DD-SESSION-SLUG.jsonl`
 - `~/.agentic-journal/agentic-journal.db`
 
 Duplicate `event_id` writes are ignored in both SQLite and the JSONL mirror so
 the two stores stay aligned. SQLite is the source of truth; the JSONL files are
 a derived copy. Concurrent writers to one root are serialized with an advisory
 lock on `.write.lock`, every new event gets a journal-wide `seq`, and readers
-return events in `seq` order.
+return events in `seq` order. Events without `session_id` use the `unscoped`
+slug. A native session title can replace a prompt-derived fallback; only that
+session's new-layout files are atomically rebuilt under the new slug. If two
+sessions normalize to the same slug, the later session gets a stable short hash
+suffix. Existing legacy `YYYY-MM-DD.jsonl` files remain untouched after the
+database migration.
 
 When a project mirror config matches an event `cwd` or `repo`, the same event is
 also written to that mirror root using the identical SQLite and JSONL layout.

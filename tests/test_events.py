@@ -1,7 +1,7 @@
 import pytest
 
 from agentic_journal.config import DEFAULT_CONFIG
-from agentic_journal.events import MAX_SEMANTIC_TEXT, SCHEMA_VERSION, normalize_event
+from agentic_journal.events import MAX_SEMANTIC_TEXT, MAX_SESSION_NAME, SCHEMA_VERSION, normalize_event
 
 
 def test_normalize_event_adds_required_fields():
@@ -66,6 +66,22 @@ def test_normalize_event_accepts_session_summary():
     assert event["event_type"] == "session_summary"
     assert event["semantic"]["summary"] == "Implemented session summary logging"
     assert event["semantic"]["outcome"] == "completed"
+
+
+def test_normalize_event_accepts_and_bounds_session_identity():
+    event = normalize_event(
+        {
+            "event_type": "semantic_note",
+            "agent": "codex",
+            "session_id": "s1",
+            "session_name": "  Имя   сессии  " + "x" * MAX_SESSION_NAME,
+            "session_name_source": "CODEX-THREAD",
+        }
+    )
+
+    assert event["session_name"].startswith("Имя сессии ")
+    assert len(event["session_name"]) == MAX_SESSION_NAME
+    assert event["session_name_source"] == "codex-thread"
 
 
 def test_normalize_event_accepts_model_operation_metadata():

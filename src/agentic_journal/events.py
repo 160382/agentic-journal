@@ -48,6 +48,7 @@ JOURNAL_MISSING_STATUS = "journal_missing"
 # transcript cannot bloat the journal. Pattern-based redaction cannot strip
 # non-secret sensitive content, so a hard length cap is the defense.
 MAX_SEMANTIC_TEXT = 4000
+MAX_SESSION_NAME = 160
 _FREE_TEXT_KEYS = ("summary", "note", "reason")
 
 
@@ -110,6 +111,8 @@ def normalize_event(raw: dict[str, Any]) -> dict[str, Any]:
         "event_type": event_type,
         "agent": event.get("agent"),
         "session_id": event.get("session_id"),
+        "session_name": _session_name(event.get("session_name")),
+        "session_name_source": _session_name_source(event.get("session_name_source")),
         "agent_id": event.get("agent_id"),
         "agent_type": event.get("agent_type"),
         "turn_id": event.get("turn_id"),
@@ -128,3 +131,17 @@ def normalize_event(raw: dict[str, Any]) -> dict[str, Any]:
         normalized["semantic"] = {**normalized["semantic"], "text": verbatim_text}
 
     return {key: value for key, value in normalized.items() if value is not None}
+
+
+def _session_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    compact = " ".join(value.split())[:MAX_SESSION_NAME].rstrip()
+    return compact or None
+
+
+def _session_name_source(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    source = value.strip().lower()
+    return source if source in {"codex-thread", "claude-ai-title", "claude-slug", "prompt", "id"} else None

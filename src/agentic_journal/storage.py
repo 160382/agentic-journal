@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
+import tempfile
+import unicodedata
 from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -22,9 +26,20 @@ from agentic_journal.project_config import discover_project_mirror_configs, even
 # Layout version of the SQLite database, tracked in PRAGMA user_version. It is
 # independent of the event SCHEMA_VERSION: index columns can change without
 # changing the event payload.
-DB_SCHEMA_VERSION = 2
+DB_SCHEMA_VERSION = 3
 WRITE_LOCK_FILENAME = ".write.lock"
 BUSY_TIMEOUT_SECONDS = 30.0
+MIRROR_LAYOUT_LEGACY = 1
+MIRROR_LAYOUT_SESSION = 2
+SESSION_SLUG_MAX_LENGTH = 80
+
+SESSION_SOURCE_RANK = {
+    "id": 0,
+    "prompt": 10,
+    "claude-slug": 20,
+    "codex-thread": 30,
+    "claude-ai-title": 30,
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +47,18 @@ class StoredEvent:
     path: Path
     inserted: bool
     seq: int
+
+
+@dataclass(frozen=True)
+class InsertResult:
+    inserted: bool
+    seq: int
+    slug: str
+    mirror_layout: int = MIRROR_LAYOUT_SESSION
+    stored_ts: str | None = None
+    previous_slug: str | None = None
+    previous_session: tuple[str, str, int, str, str] | None = None
+    session_created: bool = False
 
 
 def _date_from_ts(ts: str) -> str:
@@ -45,11 +72,34 @@ def _root_path(root: str | Path | None) -> Path:
     return Path(root).expanduser() if root else journal_root()
 
 
-def append_jsonl_event(root: str | Path, event: dict[str, Any]) -> Path:
-    root_path = Path(root).expanduser()
+def _session_hash(agent: str, session_id: str) -> str:
+    return hashlib.sha256(f"{agent}\0{session_id}".encode("utf-8")).hexdigest()[:8]
+
+
+def session_slug(name: str) -> str:
+    normalized = unicodedata.normalize("NFC", name).casefold()
+    slug = re.sub(r"[^\w]+", "-", normalized, flags=re.UNICODE).strip("-_.")
+    return slug[:SESSION_SLUG_MAX_LENGTH].rstrip("-_.")
+
+
+def _fallback_name(agent: str, session_id: str) -> str:
+    return f"session-{_session_hash(agent, session_id)}"
+
+
+def _event_path(root: str | Path, event: dict[str, Any], slug: str | None = None) -> Path:
     date = _date_from_ts(event["ts"])
+    resolved_slug = slug or session_slug(str(event.get("session_name") or ""))
+    if not resolved_slug:
+        session_id = str(event.get("session_id") or "")
+        agent = str(event.get("agent") or "unknown")
+        resolved_slug = _fallback_name(agent, session_id) if session_id else "unscoped"
+    return Path(root).expanduser() / "events" / f"{date}-{resolved_slug}.jsonl"
+
+
+def append_jsonl_event(root: str | Path, event: dict[str, Any], *, slug: str | None = None) -> Path:
+    root_path = Path(root).expanduser()
     event_dir = secure_dir(root_path / "events")
-    path = event_dir / f"{date}.jsonl"
+    path = _event_path(root_path, event, slug)
     # The whole line goes out through O_APPEND writes of one buffer: buffered
     # text IO would split a long line into several writes that another process
     # could interleave.
@@ -153,9 +203,47 @@ def _migrate_to_2(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_turn_id ON events(turn_id)")
 
 
+def _migrate_to_3(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE events ADD COLUMN session_name TEXT")
+    conn.execute("ALTER TABLE events ADD COLUMN session_name_source TEXT")
+    conn.execute(
+        f"ALTER TABLE events ADD COLUMN mirror_layout INTEGER NOT NULL DEFAULT {MIRROR_LAYOUT_LEGACY}"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_session_name ON events(session_name)")
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+          agent TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          session_name TEXT NOT NULL,
+          session_name_source TEXT NOT NULL,
+          source_rank INTEGER NOT NULL,
+          file_slug TEXT NOT NULL UNIQUE,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (agent, session_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE note_receipts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          instance TEXT NOT NULL,
+          argument_key TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          created REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_note_receipts_lookup ON note_receipts(instance, argument_key, created, id)"
+    )
+
+
 MIGRATIONS = {
     1: _migrate_to_1,
     2: _migrate_to_2,
+    3: _migrate_to_3,
 }
 
 
@@ -200,19 +288,133 @@ def init_db(root: str | Path | None = None) -> Path:
     return path
 
 
-def _insert_row(conn: sqlite3.Connection, event: dict[str, Any]) -> tuple[bool, int]:
+def _unique_slug(conn: sqlite3.Connection, base: str, agent: str, session_id: str) -> str:
+    owner = conn.execute(
+        "SELECT agent, session_id FROM sessions WHERE file_slug = ?", (base,)
+    ).fetchone()
+    if owner is None or (owner["agent"], owner["session_id"]) == (agent, session_id):
+        return base
+    return f"{base}-{_session_hash(agent, session_id)}"
+
+
+def _canonical_session(
+    conn: sqlite3.Connection, event: dict[str, Any]
+) -> tuple[str, str | None, tuple[str, str, int, str, str] | None, bool]:
+    session_id = event.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        event.pop("session_name", None)
+        event.pop("session_name_source", None)
+        return "unscoped", None, None, False
+
+    agent = str(event.get("agent") or "unknown")
+    incoming_name = event.get("session_name")
+    if not isinstance(incoming_name, str) or not incoming_name.strip():
+        incoming_name = _fallback_name(agent, session_id)
+        incoming_source = "id"
+    else:
+        incoming_name = " ".join(incoming_name.split())
+        incoming_source = str(event.get("session_name_source") or "prompt")
+        if incoming_source not in SESSION_SOURCE_RANK:
+            incoming_source = "prompt"
+    incoming_rank = SESSION_SOURCE_RANK[incoming_source]
+
+    current = conn.execute(
+        "SELECT session_name, session_name_source, source_rank, file_slug, updated_at FROM sessions "
+        "WHERE agent = ? AND session_id = ?",
+        (agent, session_id),
+    ).fetchone()
+    previous_slug = None
+    previous_session = None
+    same_rank_can_rename = incoming_source in {
+        "codex-thread",
+        "claude-ai-title",
+        "claude-slug",
+    }
+    if current is not None and (
+        incoming_rank < current["source_rank"]
+        or incoming_rank == current["source_rank"] and not same_rank_can_rename
+    ):
+        name = current["session_name"]
+        source = current["session_name_source"]
+        slug = current["file_slug"]
+    else:
+        name = incoming_name
+        source = incoming_source
+        base = session_slug(name) or _fallback_name(agent, session_id)
+        slug = _unique_slug(conn, base, agent, session_id)
+        if current is not None and (
+            current["file_slug"] != slug
+            or current["session_name"] != name
+            or current["session_name_source"] != source
+        ):
+            previous_slug = current["file_slug"]
+            previous_session = (
+                current["session_name"],
+                current["session_name_source"],
+                current["source_rank"],
+                current["file_slug"],
+                current["updated_at"],
+            )
+        conn.execute(
+            """
+            INSERT INTO sessions (
+              agent, session_id, session_name, session_name_source,
+              source_rank, file_slug, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent, session_id) DO UPDATE SET
+              session_name = excluded.session_name,
+              session_name_source = excluded.session_name_source,
+              source_rank = excluded.source_rank,
+              file_slug = excluded.file_slug,
+              updated_at = excluded.updated_at
+            """,
+            (agent, session_id, name, source, incoming_rank, slug, event["ts"]),
+        )
+    event["session_name"] = name
+    event["session_name_source"] = source
+    return slug, previous_slug, previous_session, current is None
+
+
+def _insert_row(conn: sqlite3.Connection, event: dict[str, Any]) -> InsertResult:
     with _immediate_transaction(conn):
-        existing = conn.execute("SELECT seq FROM events WHERE event_id = ?", (event["event_id"],)).fetchone()
+        existing = conn.execute(
+            "SELECT seq, ts, agent, session_id, session_name, session_name_source, mirror_layout "
+            "FROM events WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()
         if existing is not None:
-            return False, existing["seq"]
+            layout = existing["mirror_layout"]
+            slug = ""
+            if layout == MIRROR_LAYOUT_SESSION:
+                current = None
+                if existing["session_id"]:
+                    current = conn.execute(
+                        "SELECT file_slug FROM sessions WHERE agent = ? AND session_id = ?",
+                        (existing["agent"], existing["session_id"]),
+                    ).fetchone()
+                if current is not None:
+                    slug = current["file_slug"]
+                else:
+                    slug = session_slug(existing["session_name"] or "")
+                    if not slug and existing["session_id"]:
+                        slug = _fallback_name(str(existing["agent"] or "unknown"), existing["session_id"])
+                    slug = slug or "unscoped"
+            return InsertResult(
+                False,
+                existing["seq"],
+                slug,
+                mirror_layout=layout,
+                stored_ts=existing["ts"],
+            )
+        slug, previous_slug, previous_session, session_created = _canonical_session(conn, event)
         seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events").fetchone()[0]
         conn.execute(
             """
             INSERT INTO events (
               event_id, schema_version, ts, event_type, agent, session_id, cwd,
               repo, branch, commit_hash, exit_code, duration_ms, raw_json,
-              seq, agent_id, turn_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              seq, agent_id, turn_id, session_name, session_name_source, mirror_layout
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event["event_id"],
@@ -231,15 +433,28 @@ def _insert_row(conn: sqlite3.Connection, event: dict[str, Any]) -> tuple[bool, 
                 seq,
                 event.get("agent_id"),
                 event.get("turn_id"),
+                event.get("session_name"),
+                event.get("session_name_source"),
+                MIRROR_LAYOUT_SESSION,
             ),
         )
-    return True, seq
+    return InsertResult(
+        True,
+        seq,
+        slug,
+        mirror_layout=MIRROR_LAYOUT_SESSION,
+        stored_ts=event["ts"],
+        previous_slug=previous_slug,
+        previous_session=previous_session,
+        session_created=session_created,
+    )
 
 
 def _insert_event(root: str | Path | None, event: dict[str, Any]) -> tuple[bool, int]:
     init_db(root)
     with closing(connect(root)) as conn:
-        return _insert_row(conn, event)
+        result = _insert_row(conn, event)
+    return result.inserted, result.seq
 
 
 def insert_event(root: str | Path | None, event: dict[str, Any]) -> bool:
@@ -249,6 +464,25 @@ def insert_event(root: str | Path | None, event: dict[str, Any]) -> bool:
 def delete_event(root: str | Path | None, event_id: str) -> None:
     with closing(connect(root)) as conn:
         conn.execute("DELETE FROM events WHERE event_id = ?", (event_id,))
+
+
+def _restore_session(root: str | Path, event: dict[str, Any], result: InsertResult) -> None:
+    session_id = event.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    agent = str(event.get("agent") or "unknown")
+    with closing(connect(root)) as conn, _immediate_transaction(conn):
+        if result.session_created:
+            conn.execute(
+                "DELETE FROM sessions WHERE agent = ? AND session_id = ?",
+                (agent, session_id),
+            )
+        elif result.previous_session is not None:
+            conn.execute(
+                "UPDATE sessions SET session_name = ?, session_name_source = ?, source_rank = ?, "
+                "file_slug = ?, updated_at = ? WHERE agent = ? AND session_id = ?",
+                (*result.previous_session, agent, session_id),
+            )
 
 
 @contextmanager
@@ -270,31 +504,116 @@ def _write_lock(root_path: Path) -> Iterator[None]:
         os.close(fd)
 
 
+def _write_jsonl_snapshot(path: Path, events: list[dict[str, Any]]) -> None:
+    secure_dir(path.parent)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            for event in events:
+                out.write((json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp, FILE_MODE)
+        os.replace(tmp, path)
+        secure_file(path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _rewrite_session_jsonl(
+    root_path: Path,
+    agent: str,
+    session_id: str,
+    slug: str,
+    previous_slug: str,
+) -> None:
+    with closing(connect(root_path)) as conn:
+        rows = conn.execute(
+            "SELECT raw_json FROM events WHERE agent = ? AND session_id = ? "
+            "AND mirror_layout = ? ORDER BY seq",
+            (agent, session_id, MIRROR_LAYOUT_SESSION),
+        ).fetchall()
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        event = json.loads(row["raw_json"])
+        by_date.setdefault(_date_from_ts(event["ts"]), []).append(event)
+    for date, events in by_date.items():
+        target = root_path / "events" / f"{date}-{slug}.jsonl"
+        _write_jsonl_snapshot(target, events)
+    for date in by_date:
+        target = root_path / "events" / f"{date}-{slug}.jsonl"
+        old = root_path / "events" / f"{date}-{previous_slug}.jsonl"
+        if old != target:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+
+def _remove_rewritten_targets(root_path: Path, event: dict[str, Any], result: InsertResult) -> None:
+    if result.previous_slug is None or result.previous_slug == result.slug:
+        return
+    dates = {_date_from_ts(event["ts"])}
+    session_id = event.get("session_id")
+    agent = str(event.get("agent") or "unknown")
+    if isinstance(session_id, str) and session_id:
+        with closing(connect(root_path)) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT substr(ts, 1, 10) AS date FROM events "
+                "WHERE agent = ? AND session_id = ? AND mirror_layout = ?",
+                (agent, session_id, MIRROR_LAYOUT_SESSION),
+            ).fetchall()
+        dates.update(row["date"] for row in rows)
+    for date in dates:
+        try:
+            (root_path / "events" / f"{date}-{result.slug}.jsonl").unlink()
+        except OSError:
+            pass
+
+
 def _persist(root_path: Path, event: dict[str, Any]) -> StoredEvent:
-    path = root_path / "events" / f"{_date_from_ts(event['ts'])}.jsonl"
+    path = _event_path(root_path, event)
     # init_db may take the write lock itself; flock does not nest across file
     # descriptors of one process, so it has to run before the lock below.
     init_db(root_path)
     with _write_lock(root_path):
         with closing(connect(root_path)) as conn:
-            inserted, seq = _insert_row(conn, event)
-        if not inserted:
-            return StoredEvent(path, False, seq)
+            result = _insert_row(conn, event)
+        if not result.inserted:
+            date = _date_from_ts(result.stored_ts or event["ts"])
+            if result.mirror_layout == MIRROR_LAYOUT_LEGACY:
+                path = root_path / "events" / f"{date}.jsonl"
+            else:
+                path = root_path / "events" / f"{date}-{result.slug}.jsonl"
+            return StoredEvent(path, False, result.seq)
+        path = _event_path(root_path, event, result.slug)
         try:
-            path = append_jsonl_event(root_path, event)
+            if result.previous_slug is not None:
+                _rewrite_session_jsonl(
+                    root_path,
+                    str(event.get("agent") or "unknown"),
+                    str(event.get("session_id") or ""),
+                    result.slug,
+                    result.previous_slug,
+                )
+            else:
+                path = append_jsonl_event(root_path, event, slug=result.slug)
         except OSError:
             # Keep SQLite (read path) and the JSONL mirror consistent: if the
             # mirror append fails, roll back the SQLite row so a retry re-attempts
             # both writes instead of permanently skipping the mirror line.
             try:
                 delete_event(root_path, event["event_id"])
+                _restore_session(root_path, event, result)
+                _remove_rewritten_targets(root_path, event, result)
             except Exception:
                 # SQLite is the primary read path. If rollback also fails, keep
                 # surfacing the original append error; masking it would make the
                 # actionable filesystem failure harder to diagnose.
                 pass
             raise
-    return StoredEvent(path, True, seq)
+    return StoredEvent(path, True, result.seq)
 
 
 def persist_event(root: str | Path | None, event: dict[str, Any]) -> tuple[Path, bool]:

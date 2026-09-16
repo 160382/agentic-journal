@@ -59,8 +59,117 @@ def test_append_jsonl_event_writes_by_date(tmp_path):
 
     path = append_jsonl_event(root, event)
 
-    assert path == root / "events" / "2026-05-31.jsonl"
+    assert path == root / "events" / "2026-05-31-unscoped.jsonl"
     assert list(read_jsonl_events(path)) == [event]
+
+
+def test_session_jsonl_uses_human_name_and_updates_when_native_title_arrives(tmp_path):
+    root = tmp_path / "journal"
+    first = _event(
+        "e1",
+        session_id="s1",
+        session_name="Первый запрос",
+        session_name_source="prompt",
+    )
+
+    old_path = write_event(root, first)
+    new_path = write_event(
+        root,
+        _event(
+            "e2",
+            session_id="s1",
+            session_name="Доработка логирования",
+            session_name_source="codex-thread",
+        ),
+    )
+
+    assert old_path.name == "2026-05-31-первый-запрос.jsonl"
+    assert new_path.name == "2026-05-31-доработка-логирования.jsonl"
+    assert not old_path.exists()
+    events = list(read_jsonl_events(new_path))
+    assert [event["event_id"] for event in events] == ["e1", "e2"]
+    assert [event["session_name"] for event in events] == ["Первый запрос", "Доработка логирования"]
+    assert [event["session_name_source"] for event in events] == ["prompt", "codex-thread"]
+
+
+def test_duplicate_old_native_event_does_not_roll_session_name_back(tmp_path):
+    root = tmp_path / "journal"
+    old = _event(
+        "e1",
+        session_id="s1",
+        session_name="Old native name",
+        session_name_source="codex-thread",
+    )
+    write_event(root, old)
+    current = write_event(
+        root,
+        _event(
+            "e2",
+            session_id="s1",
+            session_name="Current native name",
+            session_name_source="codex-thread",
+        ),
+    )
+
+    replay = record_event(root, old)
+
+    assert not replay.inserted
+    assert replay.path == current
+    assert [event["event_id"] for event in read_jsonl_events(current)] == ["e1", "e2"]
+    assert not (root / "events" / "2026-05-31-old-native-name.jsonl").exists()
+    with closing(storage.connect(root)) as conn:
+        row = conn.execute("SELECT session_name, file_slug FROM sessions").fetchone()
+    assert tuple(row) == ("Current native name", "current-native-name")
+
+
+def test_prompt_fallback_is_stable_until_higher_priority_name_arrives(tmp_path):
+    root = tmp_path / "journal"
+    first = write_event(
+        root,
+        _event("e1", session_id="s1", session_name="Первый prompt", session_name_source="prompt"),
+    )
+    second = write_event(
+        root,
+        _event("e2", session_id="s1", session_name="Второй prompt", session_name_source="prompt"),
+    )
+
+    assert first == second
+    assert first.name == "2026-05-31-первый-prompt.jsonl"
+    assert {event["session_name"] for event in read_jsonl_events(first)} == {"Первый prompt"}
+
+
+def test_equal_session_slugs_get_stable_hash_suffix(tmp_path):
+    root = tmp_path / "journal"
+    first = write_event(
+        root,
+        _event("e1", session_id="s1", session_name="Same title", session_name_source="codex-thread"),
+    )
+    second = write_event(
+        root,
+        _event("e2", session_id="s2", session_name="Same title", session_name_source="codex-thread"),
+    )
+
+    assert first.name == "2026-05-31-same-title.jsonl"
+    assert second.name.startswith("2026-05-31-same-title-")
+    assert second.name.endswith(".jsonl")
+    assert first != second
+
+
+def test_session_spanning_midnight_gets_one_file_per_date(tmp_path):
+    root = tmp_path / "journal"
+    first = write_event(
+        root,
+        _event("e1", ts="2026-05-31T23:59:00+03:00", session_id="s1",
+               session_name="Night work", session_name_source="codex-thread"),
+    )
+    second = write_event(
+        root,
+        _event("e2", ts="2026-06-01T00:01:00+03:00", session_id="s1",
+               session_name="Night work", session_name_source="codex-thread"),
+    )
+
+    assert first.name == "2026-05-31-night-work.jsonl"
+    assert second.name == "2026-06-01-night-work.jsonl"
 
 
 def test_sqlite_storage_uses_wal_and_reads_by_date(tmp_path):
@@ -139,6 +248,32 @@ def test_write_event_preserves_original_append_error_when_rollback_fails(tmp_pat
         write_event(root, _event("e1"))
 
 
+def test_failed_session_rename_restores_registry_and_old_jsonl(tmp_path, monkeypatch):
+    root = tmp_path / "journal"
+    old_path = write_event(
+        root,
+        _event("e1", session_id="s1", session_name="Prompt name", session_name_source="prompt"),
+    )
+
+    def boom(*args, **kwargs):
+        raise OSError("snapshot failed")
+
+    monkeypatch.setattr(storage, "_write_jsonl_snapshot", boom)
+    with pytest.raises(OSError, match="snapshot failed"):
+        write_event(
+            root,
+            _event("e2", session_id="s1", session_name="Native name",
+                   session_name_source="codex-thread"),
+        )
+
+    assert old_path.exists()
+    assert not (root / "events" / "2026-05-31-native-name.jsonl").exists()
+    assert [event["event_id"] for event in read_events_for_session(root, "s1")] == ["e1"]
+    with closing(storage.connect(root)) as conn:
+        row = conn.execute("SELECT session_name, file_slug FROM sessions").fetchone()
+    assert tuple(row) == ("Prompt name", "prompt-name")
+
+
 def test_init_db_tracks_schema_user_version(tmp_path):
     root = tmp_path / "journal"
 
@@ -146,7 +281,7 @@ def test_init_db_tracks_schema_user_version(tmp_path):
 
     with closing(storage.connect(root)) as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == DB_SCHEMA_VERSION == 2
+    assert version == DB_SCHEMA_VERSION == 3
 
 
 def test_read_events_skips_future_schema_versions(tmp_path):
@@ -285,7 +420,7 @@ def test_write_event_keeps_project_mirror_idempotent(tmp_path):
 
     mirror_root = agentbase / ".agentic-journal"
     assert [item["event_id"] for item in read_events_for_date(mirror_root, "2026-05-31")] == ["cortex-duplicate"]
-    assert list(read_jsonl_events(mirror_root / "events" / "2026-05-31.jsonl")) == [event]
+    assert list(read_jsonl_events(mirror_root / "events" / "2026-05-31-unscoped.jsonl")) == [event]
 
 
 def test_project_mirror_append_failure_does_not_fail_global_write(tmp_path, monkeypatch, capsys):
@@ -296,10 +431,10 @@ def test_project_mirror_append_failure_does_not_fail_global_write(tmp_path, monk
     _write_project_config(project)
     real_append = storage.append_jsonl_event
 
-    def fail_mirror_append(root, event):
+    def fail_mirror_append(root, event, **kwargs):
         if Path(root) == agentbase / ".agentic-journal":
             raise OSError("mirror unavailable")
-        return real_append(root, event)
+        return real_append(root, event, **kwargs)
 
     monkeypatch.setattr(storage, "append_jsonl_event", fail_mirror_append)
 
@@ -352,7 +487,7 @@ def test_concurrent_processes_keep_jsonl_lines_whole_and_ordered_by_seq(tmp_path
     start_flag.touch()
     assert [process.wait(timeout=120) for process in processes] == [0] * workers
 
-    raw_lines = (root / "events" / "2026-05-31.jsonl").read_bytes().split(b"\n")
+    raw_lines = (root / "events" / "2026-05-31-unscoped.jsonl").read_bytes().split(b"\n")
     assert raw_lines[-1] == b""
     jsonl_ids = [json.loads(line)["event_id"] for line in raw_lines[:-1]]
     with closing(storage.connect(root)) as conn:
@@ -387,6 +522,28 @@ def test_init_db_migrates_version_1_database(tmp_path):
     assert version == DB_SCHEMA_VERSION
     assert [tuple(row) for row in rows] == [("early", 1, None, None), ("late", 2, "agent-1", "turn-1")]
     assert record_event(root, _event("next")).seq == 3
+
+
+def test_version_2_migration_keeps_legacy_jsonl_and_only_new_events_use_new_layout(tmp_path):
+    root = tmp_path / "journal"
+    events_dir = root / "events"
+    events_dir.mkdir(parents=True)
+    legacy = events_dir / "2026-05-31.jsonl"
+    legacy.write_text('{"event_id":"legacy"}\n', encoding="utf-8")
+    with closing(sqlite3.connect(root / "agentic-journal.db")) as conn:
+        conn.row_factory = sqlite3.Row
+        storage._migrate_to_1(conn)
+        storage._migrate_to_2(conn)
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+
+    path = write_event(root, _event("new"))
+
+    assert legacy.read_text(encoding="utf-8") == '{"event_id":"legacy"}\n'
+    assert path == events_dir / "2026-05-31-unscoped.jsonl"
+    with closing(storage.connect(root)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == DB_SCHEMA_VERSION
+        assert conn.execute("SELECT mirror_layout FROM events WHERE event_id = 'new'").fetchone()[0] == 2
 
 
 def test_record_event_reports_seq_for_new_and_duplicate_events(tmp_path):

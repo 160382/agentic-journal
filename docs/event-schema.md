@@ -1,7 +1,7 @@
 # Agentic Journal Event Schema
 
-Agentic Journal stores append-only events. Events are mirrored to daily JSONL files
-and inserted into SQLite.
+Agentic Journal stores append-only events. Events are mirrored to per-session,
+per-day JSONL files and inserted into SQLite.
 
 Required fields:
 
@@ -14,6 +14,9 @@ Common optional fields:
 
 - `agent`
 - `session_id`
+- `session_name` — human-readable name captured when the event is written
+- `session_name_source` — `codex-thread`, `claude-ai-title`, `claude-slug`,
+  `prompt`, or `id`
 - `agent_id` — the sub-agent inside a session; absent for the main agent
 - `agent_type`
 - `turn_id` — the client turn or prompt the event belongs to
@@ -44,7 +47,8 @@ Semantic note events:
 - `semantic_note` holds `semantic.note` and an optional free-form
   `semantic.category` slug of at most 64 characters.
 - `journal_note` accepts a `runtime` object from client hooks. Author and turn
-  identity (`agent_id`, `agent_type`, `turn_id`) land on the top level, `cwd`
+  identity (`agent_id`, `agent_type`, `turn_id`) and session identity
+  (`session_name`, `session_name_source`) land on the top level, `cwd`
   sets the event directory and git context, and execution conditions and
   measurements (model, modes, effort, `token_usage`, usage scope and status,
   elapsed time, native ids) land in `evidence`.
@@ -112,7 +116,7 @@ Correlation rules:
 - Guard fallback events include `files_changed` from git status when available.
   This gives objective context for missing summaries without storing prompt
   transcripts or inventing completed work.
-- Duplicate `event_id` writes are ignored so SQLite and the daily JSONL files
+- Duplicate `event_id` writes are ignored so SQLite and the JSONL files
   remain aligned.
 - SQLite stores the complete event payload in `raw_json`; `raw_json` is the source of truth.
   denormalized index columns such as `ts`, `repo`, `agent`, `event_type`, and
@@ -135,20 +139,27 @@ Write ordering rules:
   not serialized and the JSONL order is not guaranteed to follow `seq`.
 - Each JSONL line is encoded up front and appended with `O_APPEND`, so a long
   line is never interleaved with another writer's output.
-- The daily JSONL files are a derived copy of SQLite. The lock orders
+- New JSONL files are named `YYYY-MM-DD-SESSION-SLUG.jsonl`; unscoped events
+  use `YYYY-MM-DD-unscoped.jsonl`. The slug is Unicode-aware and collision-safe.
+  A later native title updates the session registry and rebuilds only that
+  session's new-layout files under the new name. Legacy `YYYY-MM-DD.jsonl`
+  files are not migrated or removed.
+- The JSONL files are a derived copy of SQLite. The lock orders
   concurrent writes but does not make the two stores atomic: a process killed
   between the insert and the append leaves the event in SQLite only, and
   nothing reconciles the JSONL copy afterwards.
 - The database layout version lives in `PRAGMA user_version` and changes
   independently of the event `schema_version`. Layout 2 adds the `seq`,
   `agent_id`, and `turn_id` index columns; existing rows get `seq` in
-  `ts, event_id` order during the migration.
+  `ts, event_id` order during the migration. Layout 3 adds session identity,
+  the per-session mirror marker and registries for session names and one-use
+  note confirmations. Existing rows remain on the legacy mirror layout.
 
 Project mirror rules:
 
 - A `.agentic-journal.toml` file can opt a project into a local mirror. Matching
   is based on exact or child-path matches against the event `repo` or `cwd`.
-- Mirror roots use the same event schema, SQLite table, daily JSONL layout, and
+- Mirror roots use the same event schema, SQLite table, per-session JSONL layout, and
   idempotent `event_id` behavior as the global journal.
 - Mirror writes preserve the original event payload. They do not add
   project-specific fields or rewrite paths.

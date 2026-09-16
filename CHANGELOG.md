@@ -9,6 +9,11 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 
 ### Added
 
+- Human-readable session identity (`session_name` and source) with native-title
+  precedence, collision-safe Unicode file slugs, and per-session daily JSONL
+  mirrors for new events. Existing daily mirrors remain unchanged.
+- SQLite-backed, one-use `note-bridge` confirmations with TTL cleanup; expired
+  files from the former bridge protocol are collected opportunistically.
 - Managed `journal_note` hook mode with visible `note`/`category` arguments only, `agentic-journal note-bridge` for full runtime storage, and private one-use confirmations that keep event IDs out of MCP results.
 - `config.toml` in the journal root is now read: values are layered over the
   built-in defaults, and an invalid file or mistyped value falls back to the
@@ -79,8 +84,9 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 - The CLI imports reports, diagnostics, installers, and the web server only in
   the commands that use them.
 - Events get a journal-wide `seq` and readers order by it instead of `ts`;
-  default timestamps carry microseconds. The database layout moves to version 2
-  (`seq`, `agent_id`, `turn_id` columns) with an in-place migration.
+  default timestamps carry microseconds. Database layout 2 adds `seq`,
+  `agent_id`, and `turn_id`; layout 3 adds session identity and SQLite bridge
+  registries while leaving legacy JSONL files untouched.
 
 ## [0.1.0] - 2026-06-02
 

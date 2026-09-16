@@ -10,16 +10,18 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
-import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import closing
 from pathlib import Path
 
-from agentic_journal.config import FILE_MODE, journal_root, secure_dir, secure_file
+from agentic_journal.config import journal_root
+from agentic_journal.storage import _immediate_transaction, connect, init_db
 
 RECEIPT_TTL_SECONDS = 30
 CLIENT_NAMES = {"codex", "claude"}
+LEGACY_NAME_RE = re.compile(r"^[0-9a-f]{32}\.(?:json|lock)$")
 
 
 def _proc_client(pid: int) -> str:
@@ -91,66 +93,85 @@ def _argument_key(note: str, category: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _paths(instance: str) -> tuple[Path, Path]:
-    directory = secure_dir(journal_root() / "note-bridge")
-    return directory / f"{instance}.json", directory / f"{instance}.lock"
-
-
-@contextmanager
-def _locked(path: Path):
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), FILE_MODE)
+def _cleanup_legacy_receipts() -> None:
+    """Best-effort removal of expired files from the pre-SQLite bridge."""
+    directory = journal_root() / "note-bridge"
     try:
-        secure_file(path)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-def _read(path: Path) -> list[dict]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = list(directory.iterdir())
     except FileNotFoundError:
-        return []
-    if not isinstance(data, list):
-        raise ValueError("invalid journal receipt queue")
-    now = time.time()
-    return [item for item in data if isinstance(item, dict)
-            and isinstance(item.get("created"), (int, float))
-            and 0 <= now - item["created"] <= RECEIPT_TTL_SECONDS]
-
-
-def _write(path: Path, entries: list[dict]) -> None:
-    fd, tmp = tempfile.mkstemp(prefix=".receipt-", dir=path.parent)
+        return
+    cutoff = time.time() - RECEIPT_TTL_SECONDS
+    instances = {
+        path.stem
+        for path in entries
+        if path.is_file() and LEGACY_NAME_RE.fullmatch(path.name)
+    }
+    for instance in instances:
+        lock = directory / f"{instance}.lock"
+        queue = directory / f"{instance}.json"
+        try:
+            candidates = [path for path in (lock, queue) if path.exists()]
+            recent = any(path.stat().st_mtime > cutoff for path in candidates)
+        except OSError:
+            continue
+        if not candidates or recent:
+            continue
+        try:
+            fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            fd = None
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                continue
+        try:
+            for path in (queue, lock):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        finally:
+            if fd is not None:
+                os.close(fd)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump(entries, out, ensure_ascii=False)
-        os.chmod(tmp, FILE_MODE)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        directory.rmdir()
+    except OSError:
+        pass
+
+
+def _purge_expired(conn, now: float) -> None:
+    conn.execute("DELETE FROM note_receipts WHERE created < ?", (now - RECEIPT_TTL_SECONDS,))
 
 
 def add_receipt(instance: str, note: str, category: str, event_id: str) -> None:
-    path, lock = _paths(instance)
-    with _locked(lock):
-        entries = _read(path)
-        entries.append({"key": _argument_key(note, category), "event_id": event_id,
-                        "created": time.time()})
-        _write(path, entries)
+    root = journal_root()
+    init_db(root)
+    now = time.time()
+    with closing(connect(root)) as conn, _immediate_transaction(conn):
+        _purge_expired(conn, now)
+        conn.execute(
+            "INSERT INTO note_receipts(instance, argument_key, event_id, created) VALUES (?, ?, ?, ?)",
+            (instance, _argument_key(note, category), event_id, now),
+        )
+    _cleanup_legacy_receipts()
 
 
 def consume_receipt(note: str, category: str) -> bool:
-    path, lock = _paths(client_instance())
+    root = journal_root()
+    init_db(root)
+    instance = client_instance()
     key = _argument_key(note, category)
-    with _locked(lock):
-        entries = _read(path)
-        matched = next((i for i, item in enumerate(entries) if item.get("key") == key), None)
-        if matched is None:
-            _write(path, entries)
-            return False
-        entries.pop(matched)
-        _write(path, entries)
-        return True
+    now = time.time()
+    with closing(connect(root)) as conn, _immediate_transaction(conn):
+        _purge_expired(conn, now)
+        matched = conn.execute(
+            "SELECT id FROM note_receipts WHERE instance = ? AND argument_key = ? "
+            "ORDER BY created, id LIMIT 1",
+            (instance, key),
+        ).fetchone()
+        if matched is not None:
+            conn.execute("DELETE FROM note_receipts WHERE id = ?", (matched["id"],))
+    _cleanup_legacy_receipts()
+    return matched is not None

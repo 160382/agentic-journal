@@ -90,7 +90,7 @@ def test_user_message_is_rejected_when_prompt_logging_is_disabled(tmp_path):
         record_event(root, _user_message("hello"))
 
     assert read_events_for_date(root, None) == []
-    assert not (root / "events" / "2026-09-14.jsonl").exists()
+    assert not (root / "events" / "2026-09-14-unscoped.jsonl").exists()
 
 
 def test_user_message_is_not_a_session_event():

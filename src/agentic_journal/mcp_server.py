@@ -29,7 +29,13 @@ MAX_CATEGORY_LENGTH = 64
 # How journal_note places the runtime metadata a client hook injects: identity
 # of the author and turn goes to the event top level, execution conditions and
 # measurements go to evidence. Unlisted runtime keys are dropped.
-RUNTIME_TOP_LEVEL_KEYS = ("agent_id", "agent_type", "turn_id")
+RUNTIME_TOP_LEVEL_KEYS = (
+    "agent_id",
+    "agent_type",
+    "turn_id",
+    "session_name",
+    "session_name_source",
+)
 RUNTIME_EVIDENCE_KEYS = (
     "model",
     "permission_mode",

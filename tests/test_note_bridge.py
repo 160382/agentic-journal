@@ -6,13 +6,14 @@ import json
 import os
 import sys
 import threading
+import time
 
 import pytest
 
 from agentic_journal.cli import main
 from agentic_journal.mcp_server import create_mcp_server
 from agentic_journal.note_bridge import _ps_client, add_receipt, client_instance, consume_receipt
-from agentic_journal.storage import read_events_for_date
+from agentic_journal.storage import connect, read_events_for_date
 
 
 class Input:
@@ -43,6 +44,9 @@ def test_hook_note_round_trip(tmp_path, monkeypatch, capsys):
     assert (event["session_id"], event["agent_id"], event["turn_id"]) == ("s1", "agent-1", "t1")
     assert event["evidence"]["token_usage"]["input_tokens"] == 42
     assert event["semantic"]["note"] == payload["note"]
+    assert not (tmp_path / "note-bridge").exists()
+    with connect(tmp_path) as conn:
+        assert conn.execute("SELECT count(*) FROM note_receipts").fetchone()[0] == 0
 
 
 def test_missing_hook_fails_without_plain_event(tmp_path, monkeypatch):
@@ -118,6 +122,34 @@ def test_two_same_notes_from_hooks_confirm_independently(tmp_path, monkeypatch):
     with pytest.raises(ToolError, match="did not confirm"):
         asyncio.run(server.call_tool("journal_note", {"note": "same", "category": "check"}))
     assert not consume_receipt("same", "check")
+
+
+def test_expired_sqlite_receipts_are_purged(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-1")
+    instance = client_instance()
+    add_receipt(instance, "old", "check", "event-old")
+    with connect(tmp_path) as conn:
+        conn.execute("UPDATE note_receipts SET created = ?", (time.time() - 31,))
+
+    assert not consume_receipt("old", "check")
+    with connect(tmp_path) as conn:
+        assert conn.execute("SELECT count(*) FROM note_receipts").fetchone()[0] == 0
+
+
+def test_legacy_receipt_files_are_collected_after_ttl(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    legacy = tmp_path / "note-bridge"
+    legacy.mkdir()
+    instance = "a" * 32
+    for suffix, content in (("json", "[]"), ("lock", "")):
+        path = legacy / f"{instance}.{suffix}"
+        path.write_text(content, encoding="utf-8")
+        os.utime(path, (time.time() - 31, time.time() - 31))
+
+    add_receipt("new-instance", "new", "check", "event-new")
+
+    assert not legacy.exists()
 
 
 def test_posix_ps_fallback_finds_same_client_for_children(monkeypatch):
