@@ -93,8 +93,8 @@ def _argument_key(note: str, category: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _cleanup_legacy_receipts() -> None:
-    """Best-effort removal of expired files from the pre-SQLite bridge."""
+def _cleanup_legacy_receipts_once() -> None:
+    """Remove expired files from the pre-SQLite bridge."""
     directory = journal_root() / "note-bridge"
     try:
         entries = list(directory.iterdir())
@@ -137,6 +137,14 @@ def _cleanup_legacy_receipts() -> None:
                 os.close(fd)
     try:
         directory.rmdir()
+    except OSError:
+        pass
+
+
+def _cleanup_legacy_receipts() -> None:
+    """Best-effort legacy cleanup that never affects SQLite receipts."""
+    try:
+        _cleanup_legacy_receipts_once()
     except OSError:
         pass
 

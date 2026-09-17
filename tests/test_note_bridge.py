@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -170,6 +171,28 @@ def test_legacy_cleanup_errors_do_not_affect_sqlite_receipts(tmp_path, monkeypat
     monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
     monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-1")
     (tmp_path / "note-bridge").write_text("not a directory", encoding="utf-8")
+    instance = client_instance()
+
+    add_receipt(instance, "note", "check", "event-new")
+
+    assert consume_receipt("note", "check")
+    assert not consume_receipt("note", "check")
+
+
+def test_legacy_entry_stat_errors_do_not_affect_sqlite_receipts(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-1")
+    legacy = tmp_path / "note-bridge"
+    legacy.mkdir()
+    (legacy / f"{'a' * 32}.json").write_text("[]", encoding="utf-8")
+    real_is_file = Path.is_file
+
+    def fail_legacy_stat(path):
+        if path.parent == legacy:
+            raise PermissionError("legacy entry is unreadable")
+        return real_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", fail_legacy_stat)
     instance = client_instance()
 
     add_receipt(instance, "note", "check", "event-new")

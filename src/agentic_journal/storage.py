@@ -389,10 +389,10 @@ def _canonical_session(
         if (
             current is not None
             and current["session_name"] == name
-            and current["session_name_source"] == source
         ):
             # Once allocated, a collision suffix belongs to this session. Do not
-            # opportunistically shorten it when another session vacates the base.
+            # opportunistically shorten it when another session vacates the base,
+            # including when only this name's source rank is upgraded.
             slug = current["file_slug"]
         else:
             base = session_slug(name) or _fallback_name(agent, session_id)

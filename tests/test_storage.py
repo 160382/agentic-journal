@@ -183,6 +183,34 @@ def test_collision_suffix_stays_stable_after_base_slug_is_vacated(tmp_path):
     assert not (tmp_path / "events" / "2026-05-31-same-title.jsonl").exists()
 
 
+def test_collision_suffix_stays_stable_when_only_name_source_is_upgraded(tmp_path):
+    first = write_event(
+        tmp_path,
+        _event("e1", session_id="s1", session_name="Same title",
+               session_name_source="prompt"),
+    )
+    second = write_event(
+        tmp_path,
+        _event("e2", session_id="s2", session_name="Same title",
+               session_name_source="prompt"),
+    )
+    write_event(
+        tmp_path,
+        _event("e3", ts="2026-05-31T11:00:00+03:00", session_id="s1",
+               session_name="Other title", session_name_source="codex-thread"),
+    )
+    upgraded = write_event(
+        tmp_path,
+        _event("e4", ts="2026-05-31T12:00:00+03:00", session_id="s2",
+               session_name="Same title", session_name_source="codex-thread"),
+    )
+
+    assert not first.exists()
+    assert upgraded == second
+    assert [event["event_id"] for event in read_jsonl_events(second)] == ["e2", "e4"]
+    assert not (tmp_path / "events" / "2026-05-31-same-title.jsonl").exists()
+
+
 def test_session_slug_respects_utf8_filename_budget(tmp_path):
     first = write_event(
         tmp_path,
