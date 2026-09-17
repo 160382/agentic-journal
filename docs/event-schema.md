@@ -162,7 +162,9 @@ Project mirror rules:
 - Mirror roots use the same event schema, SQLite table, per-session JSONL layout, and
   idempotent `event_id` behavior as the global journal.
 - Mirror writes preserve the original event payload. They do not add
-  project-specific fields or rewrite paths.
+  project-specific fields or rewrite paths. A mirror root's session registry
+  may route an out-of-order backfill to a differently named JSONL file, but the
+  event stored in SQLite and JSONL is unchanged.
 - Global journal writes remain primary. A mirror write failure is reported to
   stderr and does not fail the global write.
 - Readers can point `status`, `report`, or `web` at a mirror root with `--root`

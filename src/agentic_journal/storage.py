@@ -386,14 +386,18 @@ def _canonical_session(
     else:
         name = incoming_name
         source = incoming_source
-        base = session_slug(name) or _fallback_name(agent, session_id)
-        slug = _unique_slug(conn, base, agent, session_id)
-        if current is not None and (
-            current["file_slug"] != slug
-            or current["session_name"] != name
-            or current["session_name_source"] != source
+        if (
+            current is not None
+            and current["session_name"] == name
+            and current["session_name_source"] == source
         ):
-            previous_slug = current["file_slug"]
+            # Once allocated, a collision suffix belongs to this session. Do not
+            # opportunistically shorten it when another session vacates the base.
+            slug = current["file_slug"]
+        else:
+            base = session_slug(name) or _fallback_name(agent, session_id)
+            slug = _unique_slug(conn, base, agent, session_id)
+        if current is not None:
             previous_session = (
                 current["session_name"],
                 current["session_name_source"],
@@ -401,6 +405,8 @@ def _canonical_session(
                 current["file_slug"],
                 current["updated_at"],
             )
+            if current["file_slug"] != slug:
+                previous_slug = current["file_slug"]
         conn.execute(
             """
             INSERT INTO sessions (
@@ -421,7 +427,12 @@ def _canonical_session(
     return slug, previous_slug, previous_session, current is None
 
 
-def _insert_row(conn: sqlite3.Connection, event: dict[str, Any]) -> InsertResult:
+def _insert_row(
+    conn: sqlite3.Connection,
+    event: dict[str, Any],
+    *,
+    preserve_payload: bool = False,
+) -> InsertResult:
     with _immediate_transaction(conn):
         existing = conn.execute(
             "SELECT seq, ts, agent, session_id, session_name, session_name_source, mirror_layout "
@@ -452,7 +463,19 @@ def _insert_row(conn: sqlite3.Connection, event: dict[str, Any]) -> InsertResult
                 mirror_layout=layout,
                 stored_ts=existing["ts"],
             )
+        missing = object()
+        original_name = event.get("session_name", missing)
+        original_source = event.get("session_name_source", missing)
         slug, previous_slug, previous_session, session_created = _canonical_session(conn, event)
+        if preserve_payload:
+            if original_name is missing:
+                event.pop("session_name", None)
+            else:
+                event["session_name"] = original_name
+            if original_source is missing:
+                event.pop("session_name_source", None)
+            else:
+                event["session_name_source"] = original_source
         seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events").fetchone()[0]
         conn.execute(
             """
@@ -619,14 +642,19 @@ def _remove_rewritten_targets(root_path: Path, event: dict[str, Any], result: In
             pass
 
 
-def _persist(root_path: Path, event: dict[str, Any]) -> StoredEvent:
+def _persist(
+    root_path: Path,
+    event: dict[str, Any],
+    *,
+    preserve_payload: bool = False,
+) -> StoredEvent:
     path = _event_path(root_path, event)
     # init_db may take the write lock itself; flock does not nest across file
     # descriptors of one process, so it has to run before the lock below.
     init_db(root_path)
     with _write_lock(root_path):
         with closing(connect(root_path)) as conn:
-            result = _insert_row(conn, event)
+            result = _insert_row(conn, event, preserve_payload=preserve_payload)
         if not result.inserted:
             date = _date_from_ts(result.stored_ts or event["ts"])
             if result.mirror_layout == MIRROR_LAYOUT_LEGACY:
@@ -664,7 +692,10 @@ def _persist(root_path: Path, event: dict[str, Any]) -> StoredEvent:
 
 
 def persist_event(root: str | Path | None, event: dict[str, Any]) -> tuple[Path, bool]:
-    stored = _persist(_root_path(root), event)
+    # This low-level entry point is used for live project mirrors and backfills.
+    # Their row payload must remain byte-for-byte equivalent at the JSON object
+    # level to the global event; only destination-local routing is canonicalized.
+    stored = _persist(_root_path(root), dict(event), preserve_payload=True)
     return stored.path, stored.inserted
 
 

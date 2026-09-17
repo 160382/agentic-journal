@@ -155,6 +155,34 @@ def test_equal_session_slugs_get_stable_hash_suffix(tmp_path):
     assert first != second
 
 
+def test_collision_suffix_stays_stable_after_base_slug_is_vacated(tmp_path):
+    first = write_event(
+        tmp_path,
+        _event("e1", session_id="s1", session_name="Same title",
+               session_name_source="codex-thread"),
+    )
+    second = write_event(
+        tmp_path,
+        _event("e2", session_id="s2", session_name="Same title",
+               session_name_source="codex-thread"),
+    )
+    write_event(
+        tmp_path,
+        _event("e3", ts="2026-05-31T11:00:00+03:00", session_id="s1",
+               session_name="Other title", session_name_source="codex-thread"),
+    )
+    repeated = write_event(
+        tmp_path,
+        _event("e4", ts="2026-05-31T12:00:00+03:00", session_id="s2",
+               session_name="Same title", session_name_source="codex-thread"),
+    )
+
+    assert not first.exists()
+    assert repeated == second
+    assert [event["event_id"] for event in read_jsonl_events(second)] == ["e2", "e4"]
+    assert not (tmp_path / "events" / "2026-05-31-same-title.jsonl").exists()
+
+
 def test_session_slug_respects_utf8_filename_budget(tmp_path):
     first = write_event(
         tmp_path,
@@ -320,6 +348,37 @@ def test_write_event_rolls_back_sqlite_when_jsonl_append_fails(tmp_path, monkeyp
     # The SQLite row must be rolled back so a retry re-attempts both writes
     # instead of permanently skipping the JSONL mirror line.
     assert read_events_for_date(root, "2026-05-31") == []
+
+
+def test_failed_append_restores_session_timestamp_only_update(tmp_path, monkeypatch):
+    write_event(
+        tmp_path,
+        _event("old", session_id="s1", session_name="Old",
+               session_name_source="codex-thread"),
+    )
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(storage, "append_jsonl_event", boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_event(
+            tmp_path,
+            _event("failed", ts="2026-05-31T12:00:00+03:00", session_id="s1",
+                   session_name="Old", session_name_source="codex-thread"),
+        )
+    monkeypatch.undo()
+
+    current = write_event(
+        tmp_path,
+        _event("current", ts="2026-05-31T11:00:00+03:00", session_id="s1",
+               session_name="New", session_name_source="codex-thread"),
+    )
+
+    assert current.name == "2026-05-31-new.jsonl"
+    with closing(storage.connect(tmp_path)) as conn:
+        row = conn.execute("SELECT session_name, updated_at FROM sessions").fetchone()
+    assert tuple(row) == ("New", "2026-05-31T11:00:00+03:00")
 
 
 def test_write_event_preserves_original_append_error_when_rollback_fails(tmp_path, monkeypatch):
@@ -511,6 +570,25 @@ def test_write_event_keeps_project_mirror_idempotent(tmp_path):
     mirror_root = agentbase / ".agentic-journal"
     assert [item["event_id"] for item in read_events_for_date(mirror_root, "2026-05-31")] == ["cortex-duplicate"]
     assert list(read_jsonl_events(mirror_root / "events" / "2026-05-31-unscoped.jsonl")) == [event]
+
+
+def test_mirror_backfill_preserves_payload_while_using_current_session_path(tmp_path):
+    current = _event(
+        "new", ts="2026-05-31T12:00:00+03:00", session_id="s1",
+        session_name="New", session_name_source="codex-thread",
+    )
+    backfill = _event(
+        "old", ts="2026-05-31T11:00:00+03:00", session_id="s1",
+        session_name="Old", session_name_source="codex-thread",
+    )
+
+    storage.persist_event(tmp_path, current)
+    backfill_path, inserted = storage.persist_event(tmp_path, backfill)
+
+    assert inserted
+    assert backfill_path.name == "2026-05-31-new.jsonl"
+    assert read_events_for_date(tmp_path, None) == [current, backfill]
+    assert list(read_jsonl_events(backfill_path)) == [current, backfill]
 
 
 def test_project_mirror_append_failure_does_not_fail_global_write(tmp_path, monkeypatch, capsys):

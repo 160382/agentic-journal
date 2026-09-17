@@ -7,9 +7,11 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
+from agentic_journal import note_bridge
 from agentic_journal.cli import main
 from agentic_journal.mcp_server import create_mcp_server
 from agentic_journal.note_bridge import _ps_client, add_receipt, client_instance, consume_receipt
@@ -135,6 +137,45 @@ def test_expired_sqlite_receipts_are_purged(tmp_path, monkeypatch):
     assert not consume_receipt("old", "check")
     with connect(tmp_path) as conn:
         assert conn.execute("SELECT count(*) FROM note_receipts").fetchone()[0] == 0
+
+
+def test_receipt_expiry_is_checked_after_write_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-1")
+    instance = client_instance()
+    add_receipt(instance, "old", "check", "event-old")
+    with connect(tmp_path) as conn:
+        conn.execute("UPDATE note_receipts SET created = 70")
+
+    original_transaction = note_bridge._immediate_transaction
+    state = {"locked": False}
+
+    @contextmanager
+    def tracked_transaction(conn):
+        with original_transaction(conn):
+            state["locked"] = True
+            yield
+
+    def locked_time():
+        assert state["locked"]
+        return 101
+
+    monkeypatch.setattr(note_bridge, "_immediate_transaction", tracked_transaction)
+    monkeypatch.setattr(note_bridge.time, "time", locked_time)
+
+    assert not consume_receipt("old", "check")
+
+
+def test_legacy_cleanup_errors_do_not_affect_sqlite_receipts(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-1")
+    (tmp_path / "note-bridge").write_text("not a directory", encoding="utf-8")
+    instance = client_instance()
+
+    add_receipt(instance, "note", "check", "event-new")
+
+    assert consume_receipt("note", "check")
+    assert not consume_receipt("note", "check")
 
 
 def test_legacy_receipt_files_are_collected_after_ttl(tmp_path, monkeypatch):

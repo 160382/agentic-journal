@@ -98,7 +98,7 @@ def _cleanup_legacy_receipts() -> None:
     directory = journal_root() / "note-bridge"
     try:
         entries = list(directory.iterdir())
-    except FileNotFoundError:
+    except OSError:
         return
     cutoff = time.time() - RECEIPT_TTL_SECONDS
     instances = {
@@ -148,8 +148,8 @@ def _purge_expired(conn, now: float) -> None:
 def add_receipt(instance: str, note: str, category: str, event_id: str) -> None:
     root = journal_root()
     init_db(root)
-    now = time.time()
     with closing(connect(root)) as conn, _immediate_transaction(conn):
+        now = time.time()
         _purge_expired(conn, now)
         conn.execute(
             "INSERT INTO note_receipts(instance, argument_key, event_id, created) VALUES (?, ?, ?, ?)",
@@ -163,8 +163,10 @@ def consume_receipt(note: str, category: str) -> bool:
     init_db(root)
     instance = client_instance()
     key = _argument_key(note, category)
-    now = time.time()
     with closing(connect(root)) as conn, _immediate_transaction(conn):
+        # A competing writer may hold BEGIN IMMEDIATE for most of the receipt
+        # lifetime, so evaluate expiry only after this transaction has the lock.
+        now = time.time()
         _purge_expired(conn, now)
         matched = conn.execute(
             "SELECT id FROM note_receipts WHERE instance = ? AND argument_key = ? "

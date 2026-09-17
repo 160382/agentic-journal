@@ -348,6 +348,8 @@ database migration.
 
 When a project mirror config matches an event `cwd` or `repo`, the same event is
 also written to that mirror root using the identical SQLite and JSONL layout.
+The payload is preserved even when the mirror's local session registry routes
+an out-of-order backfill under its current session filename.
 
 Reports are written to:
 
