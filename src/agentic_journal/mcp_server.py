@@ -305,9 +305,11 @@ def create_mcp_server():
             It may include the final verification without a duplicate note.
             Pass only note and category; the hook adds metadata.
             """
-            if not consume_receipt(note, category):
+            confirmation = consume_receipt(note, category)
+            if confirmation is None:
                 raise ToolError("journal hook did not confirm this call; check the journal before retrying")
-            return ""  # Keep event ids and runtime metadata out of the chat.
+            # Category, seq, and latency only: event ids and runtime stay out of the chat.
+            return confirmation.render()
     else:
         def journal_note_tool(
             note: str,

@@ -4,10 +4,12 @@ import asyncio
 import io
 import json
 import os
+import re
 import sys
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -16,7 +18,7 @@ from agentic_journal import note_bridge
 from agentic_journal.cli import main
 from agentic_journal.mcp_server import create_mcp_server
 from agentic_journal.note_bridge import _ps_client, add_receipt, client_instance, consume_receipt
-from agentic_journal.storage import connect, read_events_for_date
+from agentic_journal.storage import connect, init_db, read_events_for_date
 
 
 class Input:
@@ -41,8 +43,8 @@ def test_hook_note_round_trip(tmp_path, monkeypatch, capsys):
     assert set(tool.inputSchema["properties"]) == {"note", "category"}
     result = asyncio.run(server.call_tool("journal_note", {"note": payload["note"],
                                                           "category": "check"}))
-    assert result[0][0].text == ""
     [event] = read_events_for_date(tmp_path, None)
+    assert re.fullmatch(r"journal ✓ · check · seq 1 · \d+ ms", result[0][0].text)
     assert event["agent"] == "codex"
     assert (event["session_id"], event["agent_id"], event["turn_id"]) == ("s1", "agent-1", "t1")
     assert event["evidence"]["token_usage"]["input_tokens"] == 42
@@ -77,7 +79,7 @@ def test_duplicate_text_receipts_are_one_use_and_isolated(tmp_path, monkeypatch)
         thread.start()
     for thread in threads:
         thread.join()
-    assert sorted(results) == [False, True, True]
+    assert sorted(result is not None for result in results) == [False, True, True]
 
     monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-2")
     assert not consume_receipt("same", "check")
@@ -119,9 +121,10 @@ def test_two_same_notes_from_hooks_confirm_independently(tmp_path, monkeypatch):
         monkeypatch.setattr(sys, "stdin", Input(payload))
         assert main(["note-bridge"]) == 0
     server = create_mcp_server()
-    for _ in range(2):
-        result = asyncio.run(server.call_tool("journal_note", {"note": "same", "category": "check"}))
-        assert result[0][0].text == ""
+    texts = [asyncio.run(server.call_tool("journal_note", {"note": "same", "category": "check"}))[0][0].text
+             for _ in range(2)]
+    assert [re.sub(r" · \d+ ms$", "", text) for text in texts] == ["journal ✓ · check · seq 1",
+                                                                  "journal ✓ · check · seq 2"]
     with pytest.raises(ToolError, match="did not confirm"):
         asyncio.run(server.call_tool("journal_note", {"note": "same", "category": "check"}))
     assert not consume_receipt("same", "check")
@@ -229,3 +232,92 @@ def test_posix_ps_fallback_finds_same_client_for_children(monkeypatch):
 
     monkeypatch.setattr("agentic_journal.note_bridge.subprocess.run", fake_ps)
     assert _ps_client(101) == _ps_client(102)
+
+
+def _bridge_and_confirm(monkeypatch, note, category, **runtime):
+    monkeypatch.setattr(sys, "stdin", Input({"note": note, "category": category, "session_id": "session-7f3a",
+                                            "runtime": {"client": "claude", **runtime}}))
+    assert main(["note-bridge"]) == 0
+    server = create_mcp_server()
+    return asyncio.run(server.call_tool("journal_note", {"note": note, "category": category}))[0][0].text
+
+
+@pytest.fixture
+def hook_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-1")
+    monkeypatch.setenv("AGENTIC_JOURNAL_REQUIRE_HOOK", "1")
+    return tmp_path
+
+
+def test_confirmation_shows_no_note_ids_or_runtime(hook_profile, monkeypatch):
+    note = "Нашёл причину: /home/user/secret-project падает на API_KEY=abc"
+    text = _bridge_and_confirm(monkeypatch, note, "finding", agent_id="agent-9c1", turn_id="turn-55",
+                               cwd="/home/user/secret-project", model="model-x",
+                               token_usage={"input_tokens": 7})
+
+    [event] = read_events_for_date(hook_profile, None)
+    assert re.fullmatch(r"journal ✓ · finding · seq 1 · \d+ ms", text)
+    for leaked in ("Нашёл", "secret-project", event["event_id"], "session-7f3a", "agent-9c1", "turn-55",
+                   "model-x", "claude", "subagent", "main"):
+        assert leaked not in text
+
+
+@pytest.mark.parametrize(("category", "shown"), [
+    ("", "uncategorized"),
+    ("   ", "uncategorized"),
+    ("проверка-гипотезы", "проверка-гипотезы"),
+    ("two\nlines\t here", "two lines here"),
+    ("x" * 80, "x" * 64),
+    ("API_KEY=abc123", "API_KEY=[REDACTED]"),
+])
+def test_confirmation_shows_stored_category_on_one_line(hook_profile, monkeypatch, category, shown):
+    text = _bridge_and_confirm(monkeypatch, "note", category)
+
+    assert text.split(" · ")[:2] == ["journal ✓", shown]
+    assert "\n" not in text
+
+
+def test_confirmation_latency_runs_from_event_time_to_consumption(hook_profile, monkeypatch):
+    monkeypatch.setattr(sys, "stdin", Input({"note": "timed", "category": "action", "session_id": "s1",
+                                            "runtime": {"client": "codex"}}))
+    assert main(["note-bridge"]) == 0
+    [event] = read_events_for_date(hook_profile, None)
+    started = datetime.fromisoformat(event["ts"]).timestamp()
+    monkeypatch.setattr(note_bridge.time, "time", lambda: started + 0.0234)
+
+    confirmation = consume_receipt("timed", "action")
+
+    assert confirmation.render() == "journal ✓ · action · seq 1 · 23 ms"
+
+
+def test_confirmation_latency_is_never_negative(hook_profile, monkeypatch):
+    monkeypatch.setattr(sys, "stdin", Input({"note": "skew", "session_id": "s1", "runtime": {"client": "codex"}}))
+    assert main(["note-bridge"]) == 0
+    [event] = read_events_for_date(hook_profile, None)
+    monkeypatch.setattr(note_bridge.time, "time", lambda: datetime.fromisoformat(event["ts"]).timestamp() - 5)
+
+    assert consume_receipt("skew", "").render() == "journal ✓ · uncategorized · seq 1 · 0 ms"
+
+
+def test_confirmation_without_stored_event_claims_only_the_receipt(hook_profile):
+    add_receipt(client_instance(), "orphan", "check", "missing-event")
+
+    assert consume_receipt("orphan", "check").render() == "journal ✓"
+
+
+def test_bridge_storage_failure_leaves_no_receipt(hook_profile, monkeypatch):
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    def fail_write(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("agentic_journal.mcp_server.write_event", fail_write)
+    monkeypatch.setattr(sys, "stdin", Input({"note": "lost", "session_id": "s1", "runtime": {"client": "codex"}}))
+
+    assert main(["note-bridge"]) == 1
+    init_db(hook_profile)
+    with connect(hook_profile) as conn:
+        assert conn.execute("SELECT count(*) FROM note_receipts").fetchone()[0] == 0
+    with pytest.raises(ToolError, match="did not confirm"):
+        asyncio.run(create_mcp_server().call_tool("journal_note", {"note": "lost"}))

@@ -1,7 +1,9 @@
 """One-use receipts for notes saved by a client hook before an MCP call.
 
 Receipts contain only a hash of the visible arguments and an event id. The
-runtime metadata stays in the journal, never in MCP tool arguments.
+runtime metadata stays in the journal, never in MCP tool arguments. Consuming a
+receipt yields a confirmation that proves the durable write without echoing
+the note, identifiers, or runtime data back into the chat.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import re
 import subprocess
 import time
 from contextlib import closing
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from agentic_journal.config import journal_root
@@ -86,6 +90,46 @@ def client_instance() -> str:
     if Path("/proc/self/stat").exists():
         return _proc_client(pid)
     return _ps_client(pid)
+
+
+@dataclass(frozen=True)
+class Confirmation:
+    """What a confirmed MCP call may show: stored category, seq, and latency.
+
+    Receipts are matched by client process and visible arguments only, so two
+    identical notes from different agents of one client can swap receipts; the
+    confirmation therefore names no track.
+    """
+
+    category: str | None
+    seq: int | None
+    latency_ms: int | None
+
+    def render(self) -> str:
+        parts = ["journal ✓"]
+        if self.category is not None:
+            parts.append(self.category or "uncategorized")
+        if self.seq is not None:
+            parts.append(f"seq {self.seq}")
+        if self.latency_ms is not None:
+            parts.append(f"{self.latency_ms} ms")
+        return " · ".join(parts)
+
+
+def _confirmation(row, now: float) -> Confirmation:
+    """Build the confirmation from the stored event the receipt points to."""
+    if row is None:
+        return Confirmation(None, None, None)
+    event = json.loads(row["raw_json"])
+    category = (event.get("semantic") or {}).get("category")
+    category = " ".join(category.split()) if isinstance(category, str) else ""
+    try:
+        # The event timestamp is taken when the bridge starts writing the note.
+        started = datetime.fromisoformat(event["ts"]).timestamp()
+        latency = max(0, round((now - started) * 1000))
+    except (KeyError, TypeError, ValueError):
+        latency = None
+    return Confirmation(category, row["seq"], latency)
 
 
 def _argument_key(note: str, category: str) -> str:
@@ -166,7 +210,7 @@ def add_receipt(instance: str, note: str, category: str, event_id: str) -> None:
     _cleanup_legacy_receipts()
 
 
-def consume_receipt(note: str, category: str) -> bool:
+def consume_receipt(note: str, category: str) -> Confirmation | None:
     root = journal_root()
     init_db(root)
     instance = client_instance()
@@ -177,11 +221,16 @@ def consume_receipt(note: str, category: str) -> bool:
         now = time.time()
         _purge_expired(conn, now)
         matched = conn.execute(
-            "SELECT id FROM note_receipts WHERE instance = ? AND argument_key = ? "
+            "SELECT id, event_id FROM note_receipts WHERE instance = ? AND argument_key = ? "
             "ORDER BY created, id LIMIT 1",
             (instance, key),
         ).fetchone()
+        confirmation = None
         if matched is not None:
             conn.execute("DELETE FROM note_receipts WHERE id = ?", (matched["id"],))
+            row = conn.execute(
+                "SELECT seq, raw_json FROM events WHERE event_id = ?", (matched["event_id"],)
+            ).fetchone()
+            confirmation = _confirmation(row, now)
     _cleanup_legacy_receipts()
-    return matched is not None
+    return confirmation
