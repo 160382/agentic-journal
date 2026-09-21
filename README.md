@@ -178,7 +178,7 @@ path = "."
 [mirror]
 enabled = true
 path = ".agentic-journal"
-# include_prompts = true  # also mirror verbatim user_message events
+# include_prompts = true  # also mirror verbatim user_message and assistant_message events
 ```
 
 Relative `project.path` and `mirror.path` values resolve from the config file
@@ -262,8 +262,7 @@ printf '%s' '{"event_type":"model_operation","agent":"codex","session_id":"s1","
 ```
 
 Exit codes: `0` stored or already present (`inserted: false` keeps the original
-`seq`), `2` invalid event or refused by config (for example a `user_message`
-without `log_prompts`), `1` storage error.
+`seq`), `2` invalid event or refused by config (for example a `user_message` or `assistant_message` without `log_prompts`), `1` storage error.
 
 For semantic notes in the managed hook profile, `note-bridge` reads one JSON object from stdin with `note`, optional `category`, `session_id`, and a hook-supplied `runtime` object whose `client` is `codex` or `claude`. It records the note and creates a private one-use confirmation for the subsequent MCP call:
 
@@ -370,7 +369,7 @@ Keys that change behavior:
 
 | Key | Default | Effect |
 |---|---|---|
-| `[privacy] log_prompts` | `false` | Accept `user_message` events and store their `semantic.text` verbatim. |
+| `[privacy] log_prompts` | `false` | Accept `user_message` and `assistant_message` events and store their `semantic.text` verbatim. |
 | `[mcp] tools` | all tools | List of MCP tool names `agentic-journal-mcp` publishes; unknown names are skipped with a warning. |
 
 ## Development
@@ -413,10 +412,7 @@ writers should not log full file contents, prompt bodies, or secrets. Known API
 keys, bearer tokens, passwords, and secret-looking values are redacted by the
 event normalization path.
 
-Setting `[privacy] log_prompts = true` opts a journal into `user_message`
-events. Their text is stored exactly as sent, without redaction or truncation,
-so anything a person pastes into a prompt ends up in the journal. Project
-mirrors receive these events only with `[mirror] include_prompts = true`.
+Setting `[privacy] log_prompts = true` opts a journal into `user_message` and `assistant_message` events. Their text is stored exactly as sent or shown, without redaction or truncation, so anything a person pastes into a prompt or an agent prints in a reply ends up in the journal. Project mirrors receive these events only with `[mirror] include_prompts = true`.
 
 ## License
 

@@ -85,6 +85,13 @@ User message events:
   appear in daily report buckets. The web API returns it with the other raw
   events of the day.
 
+Assistant message events:
+
+- `assistant_message` stores one message an agent showed to the person, exactly as the client recorded it in its transcript. It is part of the verbatim dialogue history and follows the same opt-in: a journal root accepts it only with `[privacy] log_prompts = true`.
+- `semantic.text` is required and stored verbatim under the same exemptions as `user_message` text. `semantic.phase` is required and is `commentary` for progress messages between tool calls or `final` for the answer that ends a turn; any other value is rejected.
+- `ts` is the time the client recorded the message, not the time a hook stored it. Writers that capture a message more than once must derive a stable `event_id` so repeats keep the original `seq`.
+- `assistant_message` is not a session outcome or lifecycle event and does not appear in daily report buckets.
+
 Correlation rules:
 
 - `commit` is the strongest verification key. A `git_commit` item is
@@ -169,14 +176,11 @@ Project mirror rules:
   stderr and does not fail the global write.
 - Readers can point `status`, `report`, or `web` at a mirror root with `--root`
   and receive the same report or API payload shape as the global journal.
-- `user_message` events reach a mirror, through live writes or `mirror sync`,
-  only when the project config sets `[mirror] include_prompts = true`.
+- `user_message` and `assistant_message` events reach a mirror, through live writes or `mirror sync`, only when the project config sets `[mirror] include_prompts = true`.
 
 Privacy rules:
 
-- Do not log prompt transcripts by default. The only exception is the opt-in
-  `user_message` event described above, whose `semantic.text` is stored
-  without redaction or truncation.
+- Do not log prompt transcripts by default. The only exceptions are the opt-in `user_message` and `assistant_message` events described above, whose `semantic.text` is stored without redaction or truncation.
 - Do not log full file contents.
 - Redact known API keys, bearer tokens, passwords, URL credentials, PEM private
   keys, and secret-looking values in both structured fields and free text.

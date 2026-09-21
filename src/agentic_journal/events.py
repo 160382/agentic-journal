@@ -19,6 +19,7 @@ TASK_COMPLETED_CLAIM_EVENT_TYPE = "task_completed_claim"
 TASK_BLOCKED_EVENT_TYPE = "task_blocked"
 MODEL_OPERATION_EVENT_TYPE = "model_operation"
 USER_MESSAGE_EVENT_TYPE = "user_message"
+ASSISTANT_MESSAGE_EVENT_TYPE = "assistant_message"
 
 ALLOWED_EVENT_TYPES = {
     AGENT_START_EVENT_TYPE,
@@ -31,6 +32,7 @@ ALLOWED_EVENT_TYPES = {
     TASK_BLOCKED_EVENT_TYPE,
     MODEL_OPERATION_EVENT_TYPE,
     USER_MESSAGE_EVENT_TYPE,
+    ASSISTANT_MESSAGE_EVENT_TYPE,
 }
 
 # Single source of truth for the event-type subsets used across the codebase.
@@ -41,6 +43,11 @@ SESSION_OUTCOME_EVENT_TYPES = {SESSION_SUMMARY_EVENT_TYPE, TASK_COMPLETED_CLAIM_
 SESSION_LIFECYCLE_EVENT_TYPES = {AGENT_START_EVENT_TYPE, AGENT_END_EVENT_TYPE, VERIFICATION_EVENT_TYPE}
 SESSION_EVENT_TYPES = SESSION_OUTCOME_EVENT_TYPES | SESSION_LIFECYCLE_EVENT_TYPES
 SESSION_VIEW_EVENT_TYPES = SESSION_LIFECYCLE_EVENT_TYPES | {SESSION_SUMMARY_EVENT_TYPE}
+# Dialogue text stored verbatim: gated by [privacy] log_prompts and, for project
+# mirrors, by [mirror] include_prompts.
+VERBATIM_TEXT_EVENT_TYPES = {USER_MESSAGE_EVENT_TYPE, ASSISTANT_MESSAGE_EVENT_TYPE}
+# A visible assistant message is either progress commentary or the final answer.
+ASSISTANT_MESSAGE_PHASES = ("commentary", "final")
 
 JOURNAL_MISSING_STATUS = "journal_missing"
 
@@ -53,7 +60,7 @@ _FREE_TEXT_KEYS = ("summary", "note", "reason")
 
 
 class PromptLoggingDisabledError(ValueError):
-    """A ``user_message`` reached a journal whose ``[privacy] log_prompts`` is off."""
+    """Verbatim dialogue text reached a journal whose ``[privacy] log_prompts`` is off."""
 
 
 def _validate_ts(ts: str) -> str:
@@ -80,16 +87,20 @@ def _cap_free_text(semantic: dict[str, Any]) -> dict[str, Any]:
 
 
 def _split_verbatim_text(raw: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    """Take ``semantic.text`` out of a ``user_message`` before normalization.
+    """Take ``semantic.text`` out of a dialogue event before normalization.
 
-    The user's text is stored exactly as received, so it bypasses redaction and
-    the free-text cap; the rest of the event is normalized as usual.
+    User and assistant messages are stored exactly as received, so the text
+    bypasses redaction and the free-text cap; the rest of the event is
+    normalized as usual.
     """
-    if raw.get("event_type") != USER_MESSAGE_EVENT_TYPE:
+    event_type = raw.get("event_type")
+    if event_type not in VERBATIM_TEXT_EVENT_TYPES:
         return raw, None
     semantic = raw.get("semantic")
     if not isinstance(semantic, Mapping) or not isinstance(semantic.get("text"), str):
-        raise ValueError("user_message requires semantic.text as a string")
+        raise ValueError(f"{event_type} requires semantic.text as a string")
+    if event_type == ASSISTANT_MESSAGE_EVENT_TYPE and semantic.get("phase") not in ASSISTANT_MESSAGE_PHASES:
+        raise ValueError(f"assistant_message requires semantic.phase in {ASSISTANT_MESSAGE_PHASES}")
     rest = {key: value for key, value in semantic.items() if key != "text"}
     return {**raw, "semantic": rest}, semantic["text"]
 

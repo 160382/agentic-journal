@@ -9,6 +9,7 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 
 ### Added
 
+- Opt-in `assistant_message` event for visible agent replies: `semantic.text` is stored verbatim with `semantic.phase` (`commentary` or `final`) under the same `[privacy] log_prompts` and `[mirror] include_prompts` gates as `user_message`.
 - Human-readable session identity (`session_name` and source) with native-title
   precedence, collision-safe Unicode file slugs, and per-session daily JSONL
   mirrors for new events. Existing daily mirrors remain unchanged.

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentic_journal.events import USER_MESSAGE_EVENT_TYPE
+from agentic_journal.events import VERBATIM_TEXT_EVENT_TYPES
 
 CONFIG_FILENAME = ".agentic-journal.toml"
 
@@ -87,8 +87,8 @@ def _path_matches(candidate: str | Path | None, root: Path) -> bool:
 def event_matches_project(config: ProjectMirrorConfig, event: dict[str, Any]) -> bool:
     if not config.mirror_enabled:
         return False
-    # Verbatim user text stays in the global journal unless the project opts in.
-    if event.get("event_type") == USER_MESSAGE_EVENT_TYPE and not config.include_prompts:
+    # Verbatim dialogue text stays in the global journal unless the project opts in.
+    if event.get("event_type") in VERBATIM_TEXT_EVENT_TYPES and not config.include_prompts:
         return False
     return _path_matches(event.get("repo"), config.project_path) or _path_matches(event.get("cwd"), config.project_path)
 

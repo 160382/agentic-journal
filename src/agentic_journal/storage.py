@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - non-POSIX platforms have no flock
     fcntl = None
 
 from agentic_journal.config import FILE_MODE, ensure_config, journal_root, load_config, secure_dir, secure_file
-from agentic_journal.events import SCHEMA_VERSION, USER_MESSAGE_EVENT_TYPE, PromptLoggingDisabledError
+from agentic_journal.events import SCHEMA_VERSION, VERBATIM_TEXT_EVENT_TYPES, PromptLoggingDisabledError
 from agentic_journal.project_config import discover_project_mirror_configs, event_matches_project
 
 # Layout version of the SQLite database, tracked in PRAGMA user_version. It is
@@ -722,9 +722,10 @@ def record_event(root: str | Path | None, event: dict[str, Any]) -> StoredEvent:
     root_path = _root_path(root)
     # Checked here rather than in persist_event: mirror roots carry their own
     # default config.toml and are gated by the project's include_prompts.
-    if event.get("event_type") == USER_MESSAGE_EVENT_TYPE and not load_config(root_path)["privacy"]["log_prompts"]:
+    event_type = event.get("event_type")
+    if event_type in VERBATIM_TEXT_EVENT_TYPES and not load_config(root_path)["privacy"]["log_prompts"]:
         raise PromptLoggingDisabledError(
-            f"user_message rejected: [privacy] log_prompts is disabled in {root_path / 'config.toml'}"
+            f"{event_type} rejected: [privacy] log_prompts is disabled in {root_path / 'config.toml'}"
         )
     stored = _persist(root_path, event)
     if stored.inserted:

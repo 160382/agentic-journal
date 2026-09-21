@@ -500,7 +500,7 @@ def _handle_ingest(args: argparse.Namespace) -> int:
         stored = record_event(_root_from_args(args), event)
     except (ValueError, TypeError) as exc:
         # Covers malformed JSON, schema violations, text that cannot be stored
-        # as UTF-8, and a user_message refused by [privacy] log_prompts.
+        # as UTF-8, and dialogue text refused by [privacy] log_prompts.
         print(f"agentic-journal ingest: rejected: {exc}", file=sys.stderr)
         return 2
     except (OSError, sqlite3.Error) as exc:
