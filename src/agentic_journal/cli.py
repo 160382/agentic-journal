@@ -511,6 +511,9 @@ def _handle_ingest(args: argparse.Namespace) -> int:
 
 
 def _handle_note_bridge() -> int:
+    # The note is timestamped when the bridge starts, before git context and
+    # storage work, so the MCP confirmation's latency covers the whole write.
+    started = datetime.now().astimezone().isoformat(timespec="microseconds")
     from agentic_journal.mcp_server import journal_note
     from agentic_journal.note_bridge import CLIENT_NAMES, add_receipt, client_instance
 
@@ -526,7 +529,7 @@ def _handle_note_bridge() -> int:
                 or runtime.get("client") not in CLIENT_NAMES:
             raise ValueError("session_id and client runtime are required")
         instance = client_instance()  # Fail before writing when the clients cannot share receipts.
-        result = journal_note(note=note, category=category, session_id=session_id, runtime=runtime)
+        result = journal_note(note=note, category=category, session_id=session_id, runtime=runtime, ts=started)
         if not result.startswith("logged "):
             raise ValueError(result)
         add_receipt(instance, note, category, result.removeprefix("logged "))

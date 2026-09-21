@@ -89,7 +89,7 @@ Assistant message events:
 
 - `assistant_message` stores one message an agent showed to the person, exactly as the client recorded it in its transcript. It is part of the verbatim dialogue history and follows the same opt-in: a journal root accepts it only with `[privacy] log_prompts = true`.
 - `semantic.text` is required and stored verbatim under the same exemptions as `user_message` text. `semantic.phase` is required and is `commentary` for progress messages between tool calls or `final` for the answer that ends a turn; any other value is rejected.
-- `ts` is the time the client recorded the message, not the time a hook stored it. Writers that capture a message more than once must derive a stable `event_id` so repeats keep the original `seq`.
+- Writers set `ts` to the time the client recorded the message, not the time a hook stored it; an event without `ts` gets the write time, as any other event does. Writers that capture a message more than once must derive a stable `event_id` so repeats keep the original `seq`.
 - `assistant_message` is not a session outcome or lifecycle event and does not appear in daily report buckets.
 
 Correlation rules:

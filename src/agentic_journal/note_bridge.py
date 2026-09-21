@@ -101,30 +101,30 @@ class Confirmation:
     confirmation therefore names no track.
     """
 
-    category: str | None
-    seq: int | None
+    category: str
+    seq: int
     latency_ms: int | None
 
     def render(self) -> str:
-        parts = ["journal ✓"]
-        if self.category is not None:
-            parts.append(self.category or "uncategorized")
-        if self.seq is not None:
-            parts.append(f"seq {self.seq}")
+        parts = ["journal ✓", self.category or "uncategorized", f"seq {self.seq}"]
         if self.latency_ms is not None:
             parts.append(f"{self.latency_ms} ms")
         return " · ".join(parts)
 
 
-def _confirmation(row, now: float) -> Confirmation:
-    """Build the confirmation from the stored event the receipt points to."""
+def _confirmation(row, now: float) -> Confirmation | None:
+    """Build the confirmation from the stored event the receipt points to.
+
+    A receipt whose event row is missing proves no durable write, so it does
+    not confirm the call.
+    """
     if row is None:
-        return Confirmation(None, None, None)
+        return None
     event = json.loads(row["raw_json"])
     category = (event.get("semantic") or {}).get("category")
     category = " ".join(category.split()) if isinstance(category, str) else ""
     try:
-        # The event timestamp is taken when the bridge starts writing the note.
+        # note-bridge stamps the event when it starts handling the note.
         started = datetime.fromisoformat(event["ts"]).timestamp()
         latency = max(0, round((now - started) * 1000))
     except (KeyError, TypeError, ValueError):

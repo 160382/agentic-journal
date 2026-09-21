@@ -246,7 +246,7 @@ current working directory plus git repo, branch, and commit context. This keeps
 MCP outcome events correlated with wrapper `agent_start` / `agent_end` events
 and prevents the session guard from reporting false missing-summary risks.
 
-By default, `journal_note(note, category="", agent="unknown", session_id="", runtime=None)` returns `logged <event_id>`; a storage failure is returned as a tool error. With `AGENTIC_JOURNAL_REQUIRE_HOOK=1`, the managed hook profile exposes only `note` and `category`, and a successful call returns a confirmation such as `journal ✓ · finding · seq 1842 · 23 ms`: the stored category (`uncategorized` when empty), the SQLite `seq` of the durable write, and the milliseconds from the event timestamp, taken when the bridge starts writing, to the MCP confirmation. The note text, identifiers, cwd, and runtime metadata stay out of the result, and so does the agent track: receipts match on the client process and visible arguments, so identical notes from two agents of one client may swap receipts. The hook first saves the note through `agentic-journal note-bridge`; the MCP tool consumes its short-lived confirmation instead of writing again.
+By default, `journal_note(note, category="", agent="unknown", session_id="", runtime=None)` returns `logged <event_id>`; a storage failure is returned as a tool error. With `AGENTIC_JOURNAL_REQUIRE_HOOK=1`, the managed hook profile exposes only `note` and `category`, and a successful call returns a confirmation such as `journal ✓ · finding · seq 1842 · 23 ms`: the stored category (`uncategorized` when empty), the SQLite `seq` of the durable write, and the milliseconds from the event timestamp, taken when `note-bridge` starts handling the note, to the MCP confirmation; a receipt whose event is missing confirms nothing. The note text, identifiers, cwd, and runtime metadata stay out of the result, and so does the agent track: receipts match on the client process and visible arguments, so identical notes from two agents of one client may swap receipts. The hook first saves the note through `agentic-journal note-bridge`; the MCP tool consumes its short-lived confirmation instead of writing again.
 
 `category` is a free-form slug stored in `semantic.category` and cut to 64 characters. `runtime` is supplied by client hooks through `note-bridge`, not by the model: `client` replaces `agent`; `agent_id`, `agent_type`, `turn_id`, `session_name`, and `session_name_source` go to the event top level; `cwd` sets the event directory and its git context; and `model`, `permission_mode`, `collaboration_mode`, `effort`, `usage_scope`, `usage_status`, `stats_error`, `token_usage`, `turn_elapsed_ms`, `native_session_id`, `tool_use_id`, and `injected_by` go to `evidence`. Other runtime keys are dropped.
 
@@ -261,8 +261,7 @@ printf '%s' '{"event_type":"model_operation","agent":"codex","session_id":"s1","
 # {"event_id": "...", "inserted": true, "seq": 42}
 ```
 
-Exit codes: `0` stored or already present (`inserted: false` keeps the original
-`seq`), `2` invalid event or refused by config (for example a `user_message` or `assistant_message` without `log_prompts`), `1` storage error.
+Exit codes: `0` stored or already present (`inserted: false` keeps the original `seq`), `2` invalid event or refused by config (for example a `user_message` or `assistant_message` without `log_prompts`), `1` storage error.
 
 For semantic notes in the managed hook profile, `note-bridge` reads one JSON object from stdin with `note`, optional `category`, `session_id`, and a hook-supplied `runtime` object whose `client` is `codex` or `claude`. It records the note and creates a private one-use confirmation for the subsequent MCP call:
 

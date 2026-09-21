@@ -72,6 +72,7 @@ def journal_note(
     session_id: str | None = None,
     category: str = "",
     runtime: Mapping[str, Any] | None = None,
+    ts: str | None = None,
 ) -> str:
     note_text = _clean_text(note)
     if not note_text:
@@ -89,6 +90,7 @@ def journal_note(
     event = normalize_event(
         {
             "event_type": SEMANTIC_NOTE_EVENT_TYPE,
+            "ts": ts,
             "agent": _clean_text(runtime.get("client")) or agent,
             **_event_context(session_id, Path(runtime_cwd) if isinstance(runtime_cwd, str) and runtime_cwd else None),
             **{key: runtime[key] for key in RUNTIME_TOP_LEVEL_KEYS if runtime.get(key) not in (None, "")},

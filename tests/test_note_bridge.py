@@ -21,6 +21,12 @@ from agentic_journal.note_bridge import _ps_client, add_receipt, client_instance
 from agentic_journal.storage import connect, init_db, read_events_for_date
 
 
+def _stored_event(root, note="stored"):
+    from agentic_journal.mcp_server import journal_note
+
+    return journal_note(journal_home=root, agent="codex", note=note).removeprefix("logged ")
+
+
 class Input:
     def __init__(self, value):
         self.buffer = io.BytesIO(json.dumps(value).encode())
@@ -70,8 +76,8 @@ def test_duplicate_text_receipts_are_one_use_and_isolated(tmp_path, monkeypatch)
     monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
     monkeypatch.setenv("AGENTIC_JOURNAL_BRIDGE_INSTANCE", "client-1")
     first = client_instance()
-    add_receipt(first, "same", "check", "event-1")
-    add_receipt(first, "same", "check", "event-2")
+    add_receipt(first, "same", "check", _stored_event(tmp_path, "one"))
+    add_receipt(first, "same", "check", _stored_event(tmp_path, "two"))
     results = []
     threads = [threading.Thread(target=lambda: results.append(consume_receipt("same", "check")))
                for _ in range(3)]
@@ -176,7 +182,7 @@ def test_legacy_cleanup_errors_do_not_affect_sqlite_receipts(tmp_path, monkeypat
     (tmp_path / "note-bridge").write_text("not a directory", encoding="utf-8")
     instance = client_instance()
 
-    add_receipt(instance, "note", "check", "event-new")
+    add_receipt(instance, "note", "check", _stored_event(tmp_path))
 
     assert consume_receipt("note", "check")
     assert not consume_receipt("note", "check")
@@ -198,7 +204,7 @@ def test_legacy_entry_stat_errors_do_not_affect_sqlite_receipts(tmp_path, monkey
     monkeypatch.setattr(Path, "is_file", fail_legacy_stat)
     instance = client_instance()
 
-    add_receipt(instance, "note", "check", "event-new")
+    add_receipt(instance, "note", "check", _stored_event(tmp_path))
 
     assert consume_receipt("note", "check")
     assert not consume_receipt("note", "check")
@@ -300,10 +306,26 @@ def test_confirmation_latency_is_never_negative(hook_profile, monkeypatch):
     assert consume_receipt("skew", "").render() == "journal ✓ · uncategorized · seq 1 · 0 ms"
 
 
-def test_confirmation_without_stored_event_claims_only_the_receipt(hook_profile):
+def test_receipt_without_stored_event_does_not_confirm(hook_profile):
+    from mcp.server.fastmcp.exceptions import ToolError
+
     add_receipt(client_instance(), "orphan", "check", "missing-event")
 
-    assert consume_receipt("orphan", "check").render() == "journal ✓"
+    with pytest.raises(ToolError, match="did not confirm"):
+        asyncio.run(create_mcp_server().call_tool("journal_note", {"note": "orphan", "category": "check"}))
+    assert consume_receipt("orphan", "check") is None
+
+
+def test_confirmation_latency_covers_git_context_collection(hook_profile, monkeypatch):
+    def slow_git_context(cwd, **kwargs):
+        time.sleep(0.2)
+        return {"cwd": str(cwd)}
+
+    monkeypatch.setattr("agentic_journal.mcp_server.event_context", slow_git_context)
+
+    text = _bridge_and_confirm(monkeypatch, "slow repo", "action")
+
+    assert int(re.fullmatch(r"journal ✓ · action · seq 1 · (\d+) ms", text).group(1)) >= 200
 
 
 def test_bridge_storage_failure_leaves_no_receipt(hook_profile, monkeypatch):
