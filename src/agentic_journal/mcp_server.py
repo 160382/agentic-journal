@@ -289,8 +289,9 @@ def create_mcp_server():
     from mcp.types import ToolAnnotations
 
     server = FastMCP("agentic-journal")
+    hook_mode = os.environ.get("AGENTIC_JOURNAL_REQUIRE_HOOK") == "1"
 
-    if os.environ.get("AGENTIC_JOURNAL_REQUIRE_HOOK") == "1":
+    if hook_mode:
         from mcp.server.fastmcp.exceptions import ToolError
 
         from agentic_journal.note_bridge import consume_receipt
@@ -396,12 +397,19 @@ def create_mcp_server():
     def journal_daily_report_tool(date: str = "") -> str:
         return journal_daily_report(date=date or None)
 
+    # why: in hook mode the client hook has already stored the note through
+    # note-bridge, and this call only consumes its one-use confirmation. Claude
+    # Code 2.1.299+ refuses a hook-allowed call in plan mode unless the tool is
+    # read-only, which would turn every note into a permission prompt that
+    # guards nothing. The hint also lets clients run notes concurrently; that is
+    # safe because receipts are keyed by (instance, sha256(note, category)) and
+    # consumed in one SQLite transaction. Direct mode writes here, so it stays
+    # a write tool.
+    journal_note_annotations = ToolAnnotations(
+        readOnlyHint=hook_mode, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    )
     tools = [
-        (
-            "journal_note",
-            journal_note_tool,
-            ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
-        ),
+        ("journal_note", journal_note_tool, journal_note_annotations),
         ("journal_session_summary", journal_session_summary_tool, None),
         ("journal_task_completed", journal_task_completed_tool, None),
         ("journal_task_blocked", journal_task_blocked_tool, None),

@@ -53,6 +53,7 @@ and this project uses `vMAJOR.MINOR.PATCH` Git tags for GitHub releases.
 
 ### Fixed
 
+- In the managed hook profile (`AGENTIC_JOURNAL_REQUIRE_HOOK=1`) `journal_note` is now annotated `readOnlyHint=true`: the hook has already stored the note and the call only consumes its confirmation. Claude Code 2.1.299 and later refuse a hook-allowed call to a non-read-only tool in plan mode, so every note there asked for permission. Direct mode keeps `readOnlyHint=false`.
 - Web dashboard now computes the default date per request unless an explicit
   `--date` is provided, so long-running `agentic-journal web --today` servers roll
   over to the current day after midnight.

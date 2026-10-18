@@ -320,6 +320,7 @@ def test_journal_note_without_runtime_keeps_plain_event(tmp_path):
 
 def test_journal_note_tool_schema_and_annotations(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    monkeypatch.delenv("AGENTIC_JOURNAL_REQUIRE_HOOK", raising=False)
     server = create_mcp_server()
     tool = {tool.name: tool for tool in asyncio.run(server.list_tools())}["journal_note"]
 
@@ -328,6 +329,20 @@ def test_journal_note_tool_schema_and_annotations(tmp_path, monkeypatch):
     annotations = tool.annotations
     assert (annotations.readOnlyHint, annotations.destructiveHint) == (False, False)
     assert (annotations.idempotentHint, annotations.openWorldHint) == (False, False)
+
+
+@pytest.mark.parametrize(("require_hook", "read_only"), [("1", True), ("0", False), ("", False)])
+def test_journal_note_is_read_only_only_in_hook_mode(tmp_path, monkeypatch, require_hook, read_only):
+    # The hook stores the note before the call, so the hook-mode tool only
+    # consumes a confirmation and must not trip the plan-mode write floor.
+    monkeypatch.setenv("AGENTIC_JOURNAL_HOME", str(tmp_path))
+    monkeypatch.setenv("AGENTIC_JOURNAL_REQUIRE_HOOK", require_hook)
+    server = create_mcp_server()
+    tool = {tool.name: tool for tool in asyncio.run(server.list_tools())}["journal_note"]
+
+    annotations = tool.annotations
+    assert annotations.readOnlyHint is read_only
+    assert (annotations.destructiveHint, annotations.idempotentHint, annotations.openWorldHint) == (False, False, False)
 
 
 def test_journal_note_tool_passes_category_and_runtime(tmp_path, monkeypatch):
