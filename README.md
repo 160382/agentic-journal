@@ -265,7 +265,7 @@ printf '%s' '{"event_type":"model_operation","agent":"codex","session_id":"s1","
 
 Exit codes: `0` stored or already present (`inserted: false` keeps the original `seq`), `2` invalid event or refused by config (for example a `user_message` or `assistant_message` without `log_prompts`), `1` storage error.
 
-For semantic notes in the managed hook profile, `note-bridge` reads one JSON object from stdin with `note`, optional `category`, `session_id`, and a hook-supplied `runtime` object whose `client` is `codex` or `claude`. It records the note and creates a private one-use confirmation for the subsequent MCP call:
+For semantic notes in the managed hook profile, `note-bridge` reads one JSON object from stdin with `note`, optional `category`, `session_id`, and a hook-supplied `runtime` object whose `client` is `codex`, `claude`, `opencode`, or `agy`. It records the note and creates a private one-use confirmation for the subsequent MCP call:
 
 ```bash
 # Run inside a Codex or Claude PreToolUse hook; a plain shell has no client identity.

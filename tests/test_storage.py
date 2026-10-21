@@ -301,6 +301,47 @@ def test_older_native_event_does_not_roll_session_name_back(tmp_path):
     assert tuple(row) == ("New", "2026-05-31T12:00:00+03:00")
 
 
+@pytest.mark.parametrize(("agent", "source"), [("opencode", "opencode-title"), ("agy", "agy-title")])
+def test_opencode_and_agy_titles_outrank_prompt_and_rename_at_same_rank(tmp_path, agent, source):
+    prompt = write_event(
+        tmp_path,
+        _event("e1", ts="2026-05-31T10:00:00+03:00", agent=agent, session_id="s1",
+               session_name="Первый запрос", session_name_source="prompt"),
+    )
+    titled = write_event(
+        tmp_path,
+        _event("e2", ts="2026-05-31T10:01:00+03:00", agent=agent, session_id="s1",
+               session_name="Native title", session_name_source=source),
+    )
+    renamed = write_event(
+        tmp_path,
+        _event("e3", ts="2026-05-31T10:02:00+03:00", agent=agent, session_id="s1",
+               session_name="Renamed title", session_name_source=source),
+    )
+    backfill = write_event(
+        tmp_path,
+        _event("e4", ts="2026-05-31T10:00:30+03:00", agent=agent, session_id="s1",
+               session_name="Stale title", session_name_source=source),
+    )
+    demoted = write_event(
+        tmp_path,
+        _event("e5", ts="2026-05-31T10:03:00+03:00", agent=agent, session_id="s1",
+               session_name="Later prompt", session_name_source="prompt"),
+    )
+
+    assert prompt.name == "2026-05-31-первый-запрос.jsonl"
+    assert titled.name == "2026-05-31-native-title.jsonl"
+    assert renamed.name == "2026-05-31-renamed-title.jsonl"
+    assert backfill == renamed == demoted
+    assert not prompt.exists() and not titled.exists()
+    assert [event["event_id"] for event in read_jsonl_events(renamed)] == ["e1", "e2", "e3", "e4", "e5"]
+    with closing(storage.connect(tmp_path)) as conn:
+        row = conn.execute(
+            "SELECT session_name, session_name_source, source_rank FROM sessions WHERE agent = ?", (agent,)
+        ).fetchone()
+    assert tuple(row) == ("Renamed title", source, storage.SESSION_SOURCE_RANK["codex-thread"])
+
+
 def test_session_spanning_midnight_gets_one_file_per_date(tmp_path):
     root = tmp_path / "journal"
     first = write_event(

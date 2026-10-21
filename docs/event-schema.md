@@ -16,7 +16,7 @@ Common optional fields:
 - `session_id`
 - `session_name` — human-readable name captured when the event is written
 - `session_name_source` — `codex-thread`, `claude-ai-title`, `claude-slug`,
-  `prompt`, or `id`
+  `opencode-title`, `agy-title`, `prompt`, or `id`
 - `agent_id` — the sub-agent inside a session; absent for the main agent
 - `agent_type`
 - `turn_id` — the client turn or prompt the event belongs to

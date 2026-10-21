@@ -84,6 +84,35 @@ def test_normalize_event_accepts_and_bounds_session_identity():
     assert event["session_name_source"] == "codex-thread"
 
 
+@pytest.mark.parametrize("source", ["opencode-title", "agy-title"])
+def test_normalize_event_accepts_opencode_and_agy_title_sources(source):
+    event = normalize_event(
+        {
+            "event_type": "semantic_note",
+            "agent": source.removesuffix("-title"),
+            "session_id": "s1",
+            "session_name": "Session title",
+            "session_name_source": f"  {source.upper()} ",
+        }
+    )
+
+    assert event["session_name_source"] == source
+
+
+def test_normalize_event_drops_unknown_session_name_source():
+    event = normalize_event(
+        {
+            "event_type": "semantic_note",
+            "agent": "agy",
+            "session_id": "s1",
+            "session_name": "Session title",
+            "session_name_source": "agy-unknown",
+        }
+    )
+
+    assert "session_name_source" not in event
+
+
 def test_normalize_event_accepts_model_operation_metadata():
     event = normalize_event(
         {

@@ -24,7 +24,7 @@ from agentic_journal.config import journal_root
 from agentic_journal.storage import _immediate_transaction, connect, init_db
 
 RECEIPT_TTL_SECONDS = 30
-CLIENT_NAMES = {"codex", "claude"}
+CLIENT_NAMES = {"codex", "claude", "opencode", "agy"}
 LEGACY_NAME_RE = re.compile(r"^[0-9a-f]{32}\.(?:json|lock)$")
 
 

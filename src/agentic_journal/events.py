@@ -155,4 +155,12 @@ def _session_name_source(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     source = value.strip().lower()
-    return source if source in {"codex-thread", "claude-ai-title", "claude-slug", "prompt", "id"} else None
+    return source if source in {
+        "codex-thread",
+        "claude-ai-title",
+        "claude-slug",
+        "opencode-title",
+        "agy-title",
+        "prompt",
+        "id",
+    } else None

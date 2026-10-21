@@ -42,6 +42,8 @@ SESSION_SOURCE_RANK = {
     "claude-slug": 20,
     "codex-thread": 30,
     "claude-ai-title": 30,
+    "opencode-title": 30,
+    "agy-title": 30,
 }
 
 
@@ -368,6 +370,8 @@ def _canonical_session(
         "codex-thread",
         "claude-ai-title",
         "claude-slug",
+        "opencode-title",
+        "agy-title",
     }
     stale_same_rank = (
         current is not None

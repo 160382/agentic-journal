@@ -240,6 +240,78 @@ def test_posix_ps_fallback_finds_same_client_for_children(monkeypatch):
     assert _ps_client(101) == _ps_client(102)
 
 
+@pytest.mark.parametrize("client", ["agy", "opencode"])
+def test_posix_ps_fallback_finds_agy_and_opencode_clients(monkeypatch, client):
+    class ProcessTable:
+        stdout = (f"80 1 /usr/bin/{client} Mon Sep 14 10:00:00 2026\n"
+                  "101 80 python3 Mon Sep 14 10:01:00 2026\n"
+                  "102 80 agentic-journal-mcp Mon Sep 14 10:02:00 2026\n"
+                  "90 1 /usr/bin/other Mon Sep 14 10:03:00 2026\n"
+                  "103 90 python3 Mon Sep 14 10:04:00 2026\n")
+
+    monkeypatch.setattr("agentic_journal.note_bridge.subprocess.run", lambda command, **kwargs: ProcessTable())
+    assert _ps_client(101) == _ps_client(102)
+    with pytest.raises(RuntimeError, match="cannot identify"):
+        _ps_client(103)
+
+
+def _fake_proc_stat(monkeypatch, table):
+    """Serve /proc/<pid>/stat lines for a fake process table of pid -> (comm, ppid, start)."""
+    real_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        parts = path.parts
+        if len(parts) == 4 and parts[:2] == ("/", "proc") and parts[3] == "stat":
+            comm, ppid, start = table[int(parts[2])]
+            fields = ["S", str(ppid), *["0"] * 17, str(start), "0", "0"]
+            return f"{parts[2]} ({comm}) " + " ".join(fields) + "\n"
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+@pytest.mark.parametrize("client", ["agy", "opencode"])
+def test_proc_client_resolves_agy_and_opencode_ancestor_by_comm(monkeypatch, client):
+    _fake_proc_stat(monkeypatch, {
+        1: ("systemd", 0, 1),
+        80: (client, 1, 5000),
+        101: ("bash", 80, 5100),
+        102: ("python3", 101, 5101),
+        103: ("agentic-journal", 102, 5102),
+        201: ("agentic-journal", 80, 5200),
+        90: (client, 1, 6000),
+        301: ("python3", 90, 6100),
+        400: ("other", 1, 7000),
+        401: ("python3", 400, 7100),
+    })
+
+    hook_side = note_bridge._proc_client(103)
+    assert hook_side == note_bridge._proc_client(201)
+    assert hook_side != note_bridge._proc_client(301)
+    with pytest.raises(RuntimeError, match="cannot identify"):
+        note_bridge._proc_client(401)
+
+
+@pytest.mark.parametrize("client", ["agy", "opencode"])
+def test_agy_and_opencode_hook_notes_are_queued_and_consumed(hook_profile, monkeypatch, client):
+    payload = {"note": f"Note from {client}", "category": "check", "session_id": f"{client}-session",
+               "runtime": {"client": client, "turn_id": "t1"}}
+    monkeypatch.setattr(sys, "stdin", Input(payload))
+    assert main(["note-bridge"]) == 0
+
+    [event] = read_events_for_date(hook_profile, None)
+    assert event["agent"] == client
+    assert event["session_id"] == f"{client}-session"
+    assert event["semantic"]["note"] == payload["note"]
+    with connect(hook_profile) as conn:
+        assert conn.execute("SELECT count(*) FROM note_receipts").fetchone()[0] == 1
+
+    confirmation = consume_receipt(payload["note"], "check")
+    assert confirmation is not None
+    assert re.sub(r" · \d+ ms$", "", confirmation.render()) == "journal ✓ · check · seq 1"
+    assert consume_receipt(payload["note"], "check") is None
+
+
 def _bridge_and_confirm(monkeypatch, note, category, **runtime):
     monkeypatch.setattr(sys, "stdin", Input({"note": note, "category": category, "session_id": "session-7f3a",
                                             "runtime": {"client": "claude", **runtime}}))
