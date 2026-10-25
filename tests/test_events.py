@@ -85,7 +85,7 @@ def test_normalize_event_accepts_and_bounds_session_identity():
 
 
 @pytest.mark.parametrize("source", ["opencode-title", "agy-title", "hermes-title"])
-def test_normalize_event_accepts_opencode_and_agy_title_sources(source):
+def test_normalize_event_accepts_native_title_sources(source):
     event = normalize_event(
         {
             "event_type": "semantic_note",

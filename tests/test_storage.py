@@ -302,7 +302,7 @@ def test_older_native_event_does_not_roll_session_name_back(tmp_path):
 
 
 @pytest.mark.parametrize(("agent", "source"), [("opencode", "opencode-title"), ("agy", "agy-title"), ("hermes", "hermes-title")])
-def test_opencode_and_agy_titles_outrank_prompt_and_rename_at_same_rank(tmp_path, agent, source):
+def test_native_titles_outrank_prompt_and_rename_at_same_rank(tmp_path, agent, source):
     prompt = write_event(
         tmp_path,
         _event("e1", ts="2026-05-31T10:00:00+03:00", agent=agent, session_id="s1",
