@@ -44,6 +44,7 @@ SESSION_SOURCE_RANK = {
     "claude-ai-title": 30,
     "opencode-title": 30,
     "agy-title": 30,
+    "hermes-title": 30,
 }
 
 
@@ -372,6 +373,7 @@ def _canonical_session(
         "claude-slug",
         "opencode-title",
         "agy-title",
+        "hermes-title",
     }
     stale_same_rank = (
         current is not None

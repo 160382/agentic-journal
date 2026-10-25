@@ -161,6 +161,7 @@ def _session_name_source(value: Any) -> str | None:
         "claude-slug",
         "opencode-title",
         "agy-title",
+        "hermes-title",
         "prompt",
         "id",
     } else None

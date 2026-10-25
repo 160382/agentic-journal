@@ -301,7 +301,7 @@ def test_older_native_event_does_not_roll_session_name_back(tmp_path):
     assert tuple(row) == ("New", "2026-05-31T12:00:00+03:00")
 
 
-@pytest.mark.parametrize(("agent", "source"), [("opencode", "opencode-title"), ("agy", "agy-title")])
+@pytest.mark.parametrize(("agent", "source"), [("opencode", "opencode-title"), ("agy", "agy-title"), ("hermes", "hermes-title")])
 def test_opencode_and_agy_titles_outrank_prompt_and_rename_at_same_rank(tmp_path, agent, source):
     prompt = write_event(
         tmp_path,

@@ -240,7 +240,7 @@ def test_posix_ps_fallback_finds_same_client_for_children(monkeypatch):
     assert _ps_client(101) == _ps_client(102)
 
 
-@pytest.mark.parametrize("client", ["agy", "opencode"])
+@pytest.mark.parametrize("client", ["agy", "opencode", "hermes"])
 def test_posix_ps_fallback_finds_agy_and_opencode_clients(monkeypatch, client):
     class ProcessTable:
         stdout = (f"80 1 /usr/bin/{client} Mon Sep 14 10:00:00 2026\n"
@@ -270,7 +270,7 @@ def _fake_proc_stat(monkeypatch, table):
     monkeypatch.setattr(Path, "read_text", read_text)
 
 
-@pytest.mark.parametrize("client", ["agy", "opencode"])
+@pytest.mark.parametrize("client", ["agy", "opencode", "hermes"])
 def test_proc_client_resolves_agy_and_opencode_ancestor_by_comm(monkeypatch, client):
     _fake_proc_stat(monkeypatch, {
         1: ("systemd", 0, 1),
@@ -292,7 +292,7 @@ def test_proc_client_resolves_agy_and_opencode_ancestor_by_comm(monkeypatch, cli
         note_bridge._proc_client(401)
 
 
-@pytest.mark.parametrize("client", ["agy", "opencode"])
+@pytest.mark.parametrize("client", ["agy", "opencode", "hermes"])
 def test_agy_and_opencode_hook_notes_are_queued_and_consumed(hook_profile, monkeypatch, client):
     payload = {"note": f"Note from {client}", "category": "check", "session_id": f"{client}-session",
                "runtime": {"client": client, "turn_id": "t1"}}

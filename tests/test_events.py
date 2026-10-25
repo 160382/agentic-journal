@@ -84,7 +84,7 @@ def test_normalize_event_accepts_and_bounds_session_identity():
     assert event["session_name_source"] == "codex-thread"
 
 
-@pytest.mark.parametrize("source", ["opencode-title", "agy-title"])
+@pytest.mark.parametrize("source", ["opencode-title", "agy-title", "hermes-title"])
 def test_normalize_event_accepts_opencode_and_agy_title_sources(source):
     event = normalize_event(
         {
